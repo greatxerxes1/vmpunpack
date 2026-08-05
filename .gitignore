@@ -1,0 +1,8 @@
+# runtime scratch: vmpunpack.py copies the target sample into the guest FS here on every run
+emu_root/root/filesys/c/sample/
+
+# tool output next to a sample
+*_unpacked/
+
+__pycache__/
+*.pyc

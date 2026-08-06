@@ -1,16 +1,30 @@
-import argparse, os, re, struct, subprocess, sys, shutil
+import argparse, os, re, struct, subprocess, sys, shutil, time
 
 DUMPS = r"C:\dumps"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DUMP_FILES = ("unpacked.bin", "unpacked.meta", "unpacked_late.bin", "heap.bin")
+META_KEYS = ("base", "size_of_image", "entry_rva", "oep_rva")
+MTIME_SLACK = 2.0          # filesystem timestamp granularity; keeps the staleness floor from false-firing
+MAX_DESCRIPTORS = 4096     # bounds on the import walk: every byte of it is attacker-controlled
+MAX_THUNKS = 65536
+MAX_ORDINALS = 4096
+MAX_THUNK_READS = 1 << 20  # budget across ALL descriptors: the per-dimension caps multiply otherwise
+
+class BadPE(Exception): pass
 
 def u16(b, o): return struct.unpack_from("<H", b, o)[0]
 def u32(b, o): return struct.unpack_from("<I", b, o)[0]
 def u64(b, o): return struct.unpack_from("<Q", b, o)[0]
 
-def pe_at(b): return u32(b, 0x3c)
+def pe_at(b):
+    if len(b) < 0x40 or b[0:2] != b"MZ": raise BadPE("no MZ signature")
+    pe = u32(b, 0x3c)
+    if pe + 24 > len(b) or b[pe:pe+4] != b"PE\0\0": raise BadPE(f"no PE signature at e_lfanew 0x{pe:x}")
+    return pe
 
 def sections(b):
     pe = pe_at(b); nsec = u16(b, pe+6); optsz = u16(b, pe+20); so = pe+24+optsz
+    if so + nsec*40 > len(b): raise BadPE(f"section table ({nsec} sections at 0x{so:x}) runs past end of image")
     out = []
     for i in range(nsec):
         o = so + i*40
@@ -26,103 +40,176 @@ def rva_to_off(secs, rva):
             return s["rp"] + (rva - s["va"])
     return None
 
+def _off(secs, rva, blen, need=1):
+    """rva_to_off, but only if the result is actually readable for `need` bytes."""
+    o = rva_to_off(secs, rva)
+    return o if o is not None and o >= 0 and o + need <= blen else None
+
 def pe_basics(b):
-    pe = pe_at(b); opt = pe+24; is64 = u16(b, opt) == 0x20b
+    pe = pe_at(b); opt = pe+24
+    if opt + 2 > len(b): raise BadPE("truncated optional header")
+    magic = u16(b, opt)
+    if magic not in (0x10b, 0x20b): raise BadPE(f"bad optional-header magic 0x{magic:x}")
+    is64 = magic == 0x20b
+    dd = opt + (112 if is64 else 96)
+    if dd + 16*8 > len(b): raise BadPE("truncated optional header / data directories")
     return dict(is64=is64, entry_rva=u32(b, opt+16),
                 base=(u64(b, opt+24) if is64 else u32(b, opt+28)),
-                size_of_image=u32(b, opt+56),
-                datadir_off=opt + (112 if is64 else 96))
+                size_of_image=u32(b, opt+56), datadir_off=dd)
 
 def ordinal_imports(b):
     secs = sections(b); pb = pe_basics(b)
-    imp_rva, imp_sz = struct.unpack_from("<II", b, pb["datadir_off"] + 1*8)
-    io = rva_to_off(secs, imp_rva)
+    tw = 8 if pb["is64"] else 4                                   # thunk width follows the PE class
+    flag = 0x8000000000000000 if pb["is64"] else 0x80000000
+    rd = u64 if pb["is64"] else u32
+    imp_rva, _imp_sz = struct.unpack_from("<II", b, pb["datadir_off"] + 1*8)
     res = []
-    if not io:
-        return res
-    def rstr(off):
-        e = b.index(b"\0", off); return b[off:e].decode("latin1", "replace")
-    i = 0
-    while True:
+    if not imp_rva: return res
+    io = _off(secs, imp_rva, len(b), 20)
+    if io is None: return res
+    # Deliberately NOT derived from imp_sz: the Windows loader ignores the directory Size and walks to
+    # the null descriptor, and packers routinely ship a stale/short Size. Trusting it loses real imports.
+    budget = MAX_THUNK_READS
+    for i in range(MAX_DESCRIPTORS):
         d = b[io+i*20: io+i*20+20]
         if len(d) < 20: break
         oft, ts, fc, nameRva, fthunk = struct.unpack("<IIIII", d)
         if oft == 0 and nameRva == 0 and fthunk == 0: break
-        dll = rstr(rva_to_off(secs, nameRva)) if rva_to_off(secs, nameRva) else "?"
-        to = rva_to_off(secs, oft or fthunk)
-        if to is not None:
-            j = 0
-            while True:
-                v = u64(b, to + j*8)
-                if v == 0: break
-                if v & 0x8000000000000000:
-                    res.append((dll, v & 0xffff))
-                j += 1
-        i += 1
-    return res
+        no = _off(secs, nameRva, len(b)) if nameRva else None
+        if no is None: continue
+        e = b.find(b"\0", no, min(no+256, len(b)))
+        if e < 0: continue
+        dll = b[no:e].decode("latin1", "replace")
+        to = _off(secs, oft or fthunk, len(b), tw)
+        if to is None: continue
+        j = 0
+        while j < MAX_THUNKS and budget > 0 and to + (j+1)*tw <= len(b):
+            budget -= 1
+            v = rd(b, to + j*tw)
+            if v == 0: break
+            if v & flag:
+                res.append((dll, v & 0xffff))
+                if len(res) >= MAX_ORDINALS: break        # cap here, not just between descriptors
+            j += 1
+        if len(res) >= MAX_ORDINALS or budget <= 0:
+            print(f"[!] import table exceeds the parse budget - the ordinal list below is truncated")
+            break
+    return sorted(set(res))                               # gap_fill rewrites a DLL per entry; dedup first
 
-def export_ordinal_rva(b, ordinal):
+def _export_dir(b):
     secs = sections(b); pb = pe_basics(b)
-    exp_rva, exp_sz = struct.unpack_from("<II", b, pb["datadir_off"] + 0*8)
+    exp_rva, _ = struct.unpack_from("<II", b, pb["datadir_off"] + 0*8)
     if not exp_rva: return None
-    eo = rva_to_off(secs, exp_rva)
+    eo = _off(secs, exp_rva, len(b), 40)
+    if eo is None: return None
     Base = u32(b, eo+16); nFunc = u32(b, eo+20); aFunc = u32(b, eo+28)
-    afo = rva_to_off(secs, aFunc)
-    idx = ordinal - Base
-    if not (0 <= idx < nFunc): return None
-    return u32(b, afo + idx*4)
+    if nFunc > 0x10000: return None
+    afo = _off(secs, aFunc, len(b), nFunc*4)
+    if afo is None: return None
+    return dict(secs=secs, Base=Base, nFunc=nFunc, afo=afo)
+
+def export_ordinal_range(b):
+    d = _export_dir(b)
+    return (d["Base"], d["nFunc"]) if d else None
 
 def patch_export_ordinal_to_ret(dll_path, ordinal):
-    b = bytearray(open(dll_path, "rb").read())
-    cur = export_ordinal_rva(b, ordinal)
-    if cur is None: return "oor"
-    if cur != 0: return "already"
-    secs = sections(b); pb = pe_basics(b)
+    with open(dll_path, "rb") as f: b = bytearray(f.read())
+    d = _export_dir(b)
+    if not d: return "oor"
+    idx = ordinal - d["Base"]
+    if not (0 <= idx < d["nFunc"]): return "oor"
+    if u32(b, d["afo"] + idx*4) != 0: return "already"
     ret_rva = None
-    for s in secs:
-        if (s["ch"] & 0x20000000) and s["rs"]:
+    for s in d["secs"]:
+        if (s["ch"] & 0x20000000) and s["rs"] and s["rp"] + s["rs"] <= len(b):
             k = b.find(b"\xc3", s["rp"], s["rp"] + s["rs"])
             if k != -1: ret_rva = s["va"] + (k - s["rp"]); break
     if ret_rva is None: return "noret"
-    exp_rva, _ = struct.unpack_from("<II", b, pb["datadir_off"] + 0*8)
-    eo = rva_to_off(secs, exp_rva); Base = u32(b, eo+16); aFunc = u32(b, eo+28)
-    afo = rva_to_off(secs, aFunc)
-    struct.pack_into("<I", b, afo + (ordinal - Base)*4, ret_rva)
-    open(dll_path, "wb").write(b)
+    struct.pack_into("<I", b, d["afo"] + idx*4, ret_rva)
+    with open(dll_path, "wb") as f: f.write(b)
     return "patched"
 
 def reconstruct_pe(img, meta, out_path):
     b = bytearray(img)
+    pe = pe_at(b)                                    # raises BadPE if the packer erased its own header page
+    optsz = u16(b, pe+20); nsec = u16(b, pe+6); so = pe+24+optsz
+    if so + nsec*40 > len(b): raise BadPE(f"section table ({nsec} sections) runs past end of dump")
     oep_rva = int(meta["oep_rva"], 16)
-    pe = pe_at(b); optsz = u16(b, pe+20)
     struct.pack_into("<I", b, pe+24+16, oep_rva)
-    nsec = u16(b, pe+6); so = pe+24+optsz
     for i in range(nsec):
-        o = so + i*40; vs, va = struct.unpack_from("<II", b, o+8)
-        struct.pack_into("<II", b, o+16, vs, va)
-    open(out_path, "wb").write(b)
+        o = so + i*40; vs, va, rs, rp = struct.unpack_from("<IIII", b, o+8)
+        # max(vs, rs) matches rva_to_off's convention: vs==0 with rs>0 is loader-legal and the bytes are
+        # really in the dump. Clamp to what the buffer actually holds so no header points past EOF.
+        size = 0 if va >= len(b) else min(max(vs, rs), len(b) - va)
+        struct.pack_into("<II", b, o+16, size, va)
+    with open(out_path, "wb") as f: f.write(b)
     return oep_rva
 
-def grep_iocs(b):
-    t = bytes(b).decode("latin1", "ignore"); u = bytes(b).decode("utf-16le", "ignore")
-    NOISE = re.compile(r"(microsoft|windows|schemas\.|api-ms|\.dll$|mozilla/5\.0 \(windows|w3\.org|"
-                       r"verisign|digicert|sectigo|globalsign|chocolatey|hostedtoolcache|nuget|vcpkg)", re.I)
-    dom = sorted({s.lower() for s in re.findall(
-        r"\b(?:[a-z0-9-]{2,50}\.){1,3}(?:com|net|org|ru|su|io|xyz|top|info|biz|cc|onion|pw|club|online|"
-        r"site|dev|app|shop|cyou|sbs|store|cfd|icu|monster|quest)\b", t+" "+u, re.I) if not NOISE.search(s) and len(s) > 6})
-    url = sorted({x for x in re.findall(r"https?://[^\s\"'<>\x00]{6,90}", t) if not NOISE.search(x)})
-    ip = sorted({x for x in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", t)
-                 if x not in ("0.0.0.0", "127.0.0.1", "255.255.255.255") and not x.startswith(("6.0.", "10.0.", "5.2.", "6.1.", "6.2.", "6.3."))})
-    return dom, url, ip
+TLD = (r"com|net|org|ru|su|io|xyz|top|info|biz|cc|onion|pw|club|online|site|dev|app|shop|"
+       r"cyou|sbs|store|cfd|icu|monster|quest")
+# re.A everywhere: without it [a-z] under re.I matches U+017F and \d matches any Unicode digit, so
+# binary noise decoded as UTF-16 injects non-ASCII into the IOC sets and breaks the console write.
+RE_DOM = re.compile(r"\b(?:[a-z0-9-]{2,50}\.){1,3}(?:" + TLD + r")\b", re.I | re.A)
+RE_URL = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]{6,90}", re.A)
+RE_IP = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", re.A)
+# Anchored against the registrable host only. A substring match here would drop exactly the
+# Microsoft-impersonating C2 hostnames the tool most needs to surface.
+NOISE_HOST = re.compile(r"^(?:[a-z0-9-]+\.)*(?:" + "|".join((
+    r"microsoft\.com", r"windows\.com", r"windowsupdate\.com", r"msftconnecttest\.com", r"msftncsi\.com",
+    r"live\.com", r"msn\.com", r"bing\.com", r"office\.com", r"azure\.com", r"windows\.net", r"skype\.com",
+    r"w3\.org", r"xmlsoap\.org", r"openxmlformats\.org", r"mozilla\.org", r"apache\.org", r"openssl\.org",
+    r"python\.org", r"letsencrypt\.org", r"nuget\.org", r"chocolatey\.org", r"oasis-open\.org",
+    r"verisign\.com", r"digicert\.com", r"sectigo\.com", r"globalsign\.com", r"godaddy\.com",
+    r"comodoca\.com", r"entrust\.net", r"thawte\.com", r"geotrust\.com", r"symcb\.com", r"symcd\.com",
+    r"amazontrust\.com", r"usertrust\.com", r"trustwave\.com", r"identrust\.com", r"sectigo\.net",
+)) + r")$", re.I)
 
-def run_analyzer(a, args):
+def _host(u):
+    # take the LAST @-separated part: http://update.microsoft.com@<real-c2>/ must not read as Microsoft
+    m = re.match(r"https?://([^/\s]+)", u, re.I)
+    a = (m.group(1) if m else "").rsplit("@", 1)[-1]
+    return a.split(":")[0].lower().rstrip(".")
+
+def _ok_ip(x):
+    p = x.split(".")
+    if any(not (q.isdigit() and len(q) <= 3 and int(q) <= 255) for q in p): return False
+    return x not in ("0.0.0.0", "127.0.0.1", "255.255.255.255")
+
+def _scan(text, dom, url, ip):
+    for s in RE_DOM.findall(text):
+        s = s.lower()
+        if len(s) > 6 and not NOISE_HOST.match(s): dom.add(s)
+    for x in RE_URL.findall(text):
+        if not NOISE_HOST.match(_host(x)): url.add(x)
+    for x in RE_IP.findall(text):
+        if _ok_ip(x): ip.add(x)
+
+def grep_iocs(b, chunk=64 << 20, overlap=1 << 12):
+    """All three patterns see all three views. Chunked so a several-hundred-MB heap dump cannot
+    blow memory up by decoding the whole buffer twice and concatenating it."""
+    dom, url, ip = set(), set(), set()
+    n = len(b)
+    spans = [(0, n)] if n <= chunk else [(s, min(s + chunk + overlap, n)) for s in range(0, n, chunk)]
+    for s, e in spans:
+        seg = bytes(b[s:e])
+        _scan(seg.decode("latin1", "ignore"), dom, url, ip)         # single-byte
+        _scan(seg.decode("utf-16le", "ignore"), dom, url, ip)       # wide, even-aligned
+        _scan(seg[1:].decode("utf-16le", "ignore"), dom, url, ip)   # wide, odd-aligned
+    return sorted(dom), sorted(url), sorted(ip)
+
+def run_analyzer(args):
     guest_name = os.path.basename(args.target)
     guest_dir = os.path.join(args.emuroot, "filesys", "c", "sample")
     os.makedirs(guest_dir, exist_ok=True)
     shutil.copy(args.target, os.path.join(guest_dir, guest_name))
-    for f in ("unpacked.bin", "unpacked.meta", "unpacked_late.bin", "heap.bin"):
-        try: os.remove(os.path.join(DUMPS, f))
-        except OSError: pass
+    for f in DUMP_FILES:
+        p = os.path.join(DUMPS, f)
+        try: os.remove(p)
+        except FileNotFoundError: pass
+        except OSError as e:
+            sys.exit(f"[!] cannot clear stale dump {p}: {e}\n"
+                     "    Close whatever holds it open and re-run. Refusing to continue rather than risk\n"
+                     "    publishing a previous sample's image as this one's result.")
     env = dict(os.environ); env["SOGEN_UNPACK"] = "1"
     for k in ("SOGEN_STOP_AT_OEP", "SOGEN_NODELAY", "SOGEN_TSC_STRIDE", "SOGEN_OEP_RVA", "SOGEN_LATEDUMP_AT"):
         env.pop(k, None)
@@ -135,15 +222,58 @@ def run_analyzer(a, args):
            "-e", args.emuroot, "-r", os.path.join(args.emuroot, "registry"),
            "--report", os.path.join(DUMPS, "vmp_run.jsonl"), "--stdout", os.path.join(DUMPS, "vmp_guest.txt"),
            "--first-exec", "-c", "C:\\sample\\" + guest_name]
+    dec = lambda s: s if isinstance(s, str) else (s.decode("latin1", "replace") if s else "")
+    t0 = time.time() - MTIME_SLACK              # captured immediately before launch: the staleness floor
     try:
         p = subprocess.run(cmd, cwd=args.sogen, env=env, capture_output=True, text=True,
                            encoding="latin1", timeout=args.timeout, stdin=subprocess.DEVNULL)
-        log = p.stdout or ""
+        return dict(log=p.stdout or "", err=p.stderr or "", rc=p.returncode, timeout=False, t0=t0)
     except subprocess.TimeoutExpired as e:
-        log = (e.stdout or "") if isinstance(e.stdout, str) else ""
-    return log
+        return dict(log=dec(e.stdout), err=dec(e.stderr), rc=None, timeout=True, t0=t0)
+
+def gap_fill(args, ords):
+    sys32 = os.path.join(args.emuroot, "filesys", "c", "windows", "system32")
+    try: sys32_real = os.path.realpath(sys32)
+    except OSError: return
+    for dll, ordv in ords:
+        # every byte of `dll` came out of the sample: it must be a plain filename, never a path
+        if dll != os.path.basename(dll) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", dll):
+            print(f"[!] refusing import DLL name {dll!r} from the sample (not a plain filename)"); continue
+        dpath = os.path.join(sys32, dll)
+        if not os.path.isfile(dpath) and os.path.isdir(sys32):
+            hit = next((f for f in os.listdir(sys32) if f.lower() == dll.lower()), None)
+            if hit: dpath = os.path.join(sys32, hit)
+        try:
+            if os.path.commonpath([os.path.realpath(dpath), sys32_real]) != sys32_real: raise ValueError
+        except ValueError:
+            print(f"[!] {dll!r} resolves outside the emulation root - skipping"); continue
+        if not os.path.isfile(dpath):
+            print(f"[!] emu-root DLL not found for {dll} (ordinal {ordv}) at {dpath}"); continue
+        try: r = patch_export_ordinal_to_ret(dpath, ordv)
+        except (BadPE, struct.error, OSError) as e:
+            print(f"[!] {dll}: cannot patch the emulation-root copy ({e})"); continue
+        if r == "patched": print(f"[+] gap-filled {dll}#{ordv} (empty export slot -> ret stub)")
+        elif r == "already": print(f"[i] {dll}#{ordv}: export slot already populated - left alone")
+        elif r == "noret": print(f"[!] {dll}#{ordv}: no ret byte to point at - not gap-filled")
+        elif r == "oor":
+            rng = None
+            try:
+                with open(dpath, "rb") as f: rng = export_ordinal_range(bytearray(f.read()))
+            except (BadPE, struct.error, OSError): pass
+            if rng:
+                print(f"[!] {dll}#{ordv}: ordinal is outside this DLL's export range "
+                      f"(it exports {rng[0]}..{rng[0]+rng[1]-1}).")
+                print(f"    Neither the auto gap-fill nor patch_ordinal.py can fix that - the emulation")
+                print(f"    root's {dll} is a different build from the one this sample was linked against.")
+            else:
+                print(f"[!] {dll}#{ordv}: the emulation root's copy has no readable export directory.")
 
 def main():
+    # Sample-derived text (import DLL names) and the analyzer's latin1-decoded stderr both get printed.
+    # Under a redirect stdout uses the ANSI codepage, where 0x80-0x9F is unencodable in every variant.
+    for _s in (sys.stdout, sys.stderr):
+        try: _s.reconfigure(errors="backslashreplace")
+        except Exception: pass
     ap = argparse.ArgumentParser(description="Self-contained generic VMProtect unpacker (runs locally on the sogen VM).")
     ap.add_argument("target")
     ap.add_argument("-o", "--out", default=None)
@@ -160,32 +290,43 @@ def main():
     os.makedirs(DUMPS, exist_ok=True)
     if not os.path.isfile(args.target): sys.exit(f"[!] target not found: {args.target}")
     if not os.path.isfile(os.path.join(args.sogen, "analyzer.exe")): sys.exit(f"[!] analyzer.exe not in {args.sogen}")
+    for k in ("tsc", "oep"):
+        v = getattr(args, k)
+        if v is not None and not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{1,16}", v):
+            sys.exit(f"[!] --{k} must be a hex number, got {v!r}")
     out = args.out or (os.path.splitext(args.target)[0] + "_unpacked")
+    if os.path.normcase(os.path.realpath(out)) == os.path.normcase(os.path.realpath(DUMPS)):
+        sys.exit(f"[!] -o must not be {DUMPS}: that is the shared scratch dir this run purges and reads back.")
     os.makedirs(out, exist_ok=True)
-    tgt = open(args.target, "rb").read()
-    pb = pe_basics(tgt)
+    with open(args.target, "rb") as f: tgt = f.read()
+    try:
+        pb = pe_basics(tgt)
+    except (BadPE, struct.error) as e:
+        sys.exit(f"[!] unparseable PE headers in target: {e}")
+    if not pb["is64"]:
+        sys.exit("[!] target is a 32-bit PE. This tool and the bundled emulation root are x64-only.")
     print(f"[i] target base=0x{pb['base']:x} entry_rva=0x{pb['entry_rva']:x} size_of_image=0x{pb['size_of_image']:x}")
 
-    ords = ordinal_imports(tgt)
+    try:
+        ords = ordinal_imports(tgt)
+    except (BadPE, struct.error) as e:
+        print(f"[!] import table unparseable ({e}) - skipping the ordinal gap-fill"); ords = []
     if ords:
-        print(f"[i] ordinal imports: " + ", ".join(f"{d}#{o}" for d, o in ords))
-        for dll, ordv in ords:
-            dpath = os.path.join(args.emuroot, "filesys", "c", "windows", "system32", dll)
-            if not os.path.isfile(dpath):
-                d = os.path.dirname(dpath)
-                hit = next((f for f in os.listdir(d) if f.lower() == dll.lower()), None) if os.path.isdir(d) else None
-                dpath = os.path.join(d, hit) if hit else dpath
-            if os.path.isfile(dpath):
-                r = patch_export_ordinal_to_ret(dpath, ordv)
-                if r == "patched": print(f"[+] gap-filled {dll}#{ordv} (empty export slot -> ret stub)")
-            else:
-                print(f"[!] emu-root DLL not found for {dll} (ordinal {ordv}) at {dpath}")
+        print("[i] ordinal imports: " + ", ".join(f"{d}#{o}" for d, o in ords))
+        gap_fill(args, ords)
 
     print(f"[*] running sogen (unicorn+JIT){' [payload]' if args.run_payload else ' [stop@OEP]'} timeout={args.timeout}s")
-    log = run_analyzer(args, args)
+    run = run_analyzer(args)
+    log = run["log"]
+    if run["timeout"]: print(f"[!] analyzer hit the {args.timeout}s timeout and was killed - any dump may be partial")
+    if run["rc"]: print(f"[!] analyzer exited {run['rc']}")
+    if run["err"].strip():
+        print("[analyzer stderr]")
+        for ln in run["err"].strip().splitlines()[-20:]: print("    " + ln)
 
     upath = os.path.join(DUMPS, "unpacked.bin"); mpath = os.path.join(DUMPS, "unpacked.meta")
-    if not (os.path.isfile(upath) and os.path.getsize(upath) and os.path.isfile(mpath)):
+    if not (os.path.isfile(upath) and os.path.getsize(upath)
+            and os.path.isfile(mpath) and os.path.getsize(mpath)):
         for ln in log.splitlines():
             if any(k in ln for k in ("UNPACK", "terminated", "HardError", "backend")): print("    " + ln)
         if "C0000138" in log:
@@ -193,20 +334,81 @@ def main():
             print("    ordinal-imports list above; patch its DLL with patch_ordinal.py and retry.")
         sys.exit("[!] no unpacked image produced. Hints: --nodelay --tsc 0x8000 --timeout 480, or --oep 0xRVA.")
 
-    meta = dict(l.strip().split("=", 1) for l in open(mpath) if "=" in l)
-    shutil.copy(upath, os.path.join(out, "unpacked.bin")); shutil.copy(mpath, os.path.join(out, "unpacked.meta"))
-    for extra in ("unpacked_late.bin", "heap.bin"):
-        ep = os.path.join(DUMPS, extra)
-        if os.path.isfile(ep) and os.path.getsize(ep): shutil.copy(ep, os.path.join(out, extra))
+    # Nothing above proves the dump belongs to THIS run: C:\dumps is a fixed path baked into analyzer.exe
+    # and shared by every invocation on the machine. Bind it to the run before publishing anything.
+    if min(os.path.getmtime(upath), os.path.getmtime(mpath)) < run["t0"]:
+        sys.exit(f"[!] the dump in {DUMPS} predates this run - it belongs to an earlier sample.\n"
+                 "    Refusing to publish it. Delete it and re-run.")
+    with open(mpath, encoding="latin1") as f:
+        meta = dict(l.strip().split("=", 1) for l in f if "=" in l)
+    missing = [k for k in META_KEYS if k not in meta]
+    if missing: sys.exit(f"[!] unpacked.meta is missing {', '.join(missing)} - refusing to publish a partial dump.")
+    try:
+        m = {k: int(meta[k], 16) for k in META_KEYS}
+    except ValueError as e:
+        sys.exit(f"[!] unpacked.meta holds a non-hex value ({e}) - refusing to publish.")
+    if m["size_of_image"] != pb["size_of_image"] or m["entry_rva"] != pb["entry_rva"]:
+        sys.exit("[!] the dump does not describe this target - refusing to publish it:\n"
+                 f"    target: size_of_image=0x{pb['size_of_image']:x} entry_rva=0x{pb['entry_rva']:x}\n"
+                 f"    dump  : size_of_image=0x{m['size_of_image']:x} entry_rva=0x{m['entry_rva']:x}\n"
+                 f"    Another vmpunpack run is probably sharing {DUMPS}; run them one at a time.")
+    if m["base"] != pb["base"]:
+        print(f"[i] dump base 0x{m['base']:x} differs from the header's 0x{pb['base']:x} (image was relocated)")
+    if not (0 < m["oep_rva"] < pb["size_of_image"]):
+        sys.exit(f"[!] oep_rva 0x{m['oep_rva']:x} is outside the image (size_of_image="
+                 f"0x{pb['size_of_image']:x}) - refusing to publish a bogus entry point.")
+
+    # a rerun that produces fewer artefacts must not leave the previous run's next to the new ones
     name = os.path.splitext(os.path.basename(args.target))[0]
     out_exe = os.path.join(out, name + ".unpacked.exe")
-    oep = reconstruct_pe(open(upath, "rb").read(), meta, out_exe)
+    for f in DUMP_FILES + ("iocs.txt", name + ".unpacked.exe"):
+        try: os.remove(os.path.join(out, f))
+        except FileNotFoundError: pass
+        except OSError as e:
+            print(f"[!] stale {f} in the output dir could not be removed ({e})")
+            print("    - it is NOT from this run; close whatever holds it open.")
+    shutil.copy(upath, os.path.join(out, "unpacked.bin")); shutil.copy(mpath, os.path.join(out, "unpacked.meta"))
+    extras = []
+    for extra in ("unpacked_late.bin", "heap.bin"):
+        ep = os.path.join(DUMPS, extra)
+        if os.path.isfile(ep) and os.path.getsize(ep) and os.path.getmtime(ep) >= run["t0"]:
+            shutil.copy(ep, os.path.join(out, extra)); extras.append(extra)
+
+    with open(upath, "rb") as f: img = f.read()
+    # the .meta was matched to the target above, but the image published is unpacked.bin - bind it too,
+    # or a torn .bin/.meta pair from a concurrent run still gets through
+    try:
+        ib = pe_basics(img)
+        if ib["size_of_image"] != m["size_of_image"] or ib["entry_rva"] != m["entry_rva"]:
+            sys.exit("[!] unpacked.bin's own headers disagree with unpacked.meta - the two files come from\n"
+                     f"    different runs sharing {DUMPS}. Refusing to publish.")
+    except (BadPE, struct.error):
+        pass                        # erased header page: the reconstruct_pe path below reports it
+    if len(img) != m["size_of_image"]:
+        print(f"[!] dump is 0x{len(img):x} bytes but SizeOfImage is 0x{m['size_of_image']:x} - size mismatch;")
+        print("    section raw sizes are clamped to what is actually present.")
+    try:
+        oep = reconstruct_pe(img, meta, out_exe)
+    except (BadPE, struct.error) as e:
+        print(f"[!] cannot rebuild a loadable PE: {e}")
+        print(f"    The packer most likely erased its own header page before jumping to OEP.")
+        print(f"    unpacked.bin and unpacked.meta are in {out} - rebuild the headers from the")
+        print(f"    target's on-disk ones by hand (base=0x{m['base']:x} oep_rva=0x{m['oep_rva']:x}).")
+        sys.exit(1)
     print(f"[+] OEP rva 0x{oep:x}; wrote {out_exe}")
 
-    dom, url, ip = grep_iocs(open(upath, "rb").read())
-    with open(os.path.join(out, "iocs.txt"), "w") as f:
-        f.write("domains: " + ", ".join(dom) + "\nurls: " + ", ".join(url) + "\nips: " + ", ".join(ip) + "\n")
-    print(f"[IOC] domains={dom or '-'}  urls={url or '-'}  ips={ip or '-'}")
+    def _sources():                      # one dump resident at a time: heap.bin can be hundreds of MB
+        yield "unpacked.bin", img
+        for extra in extras:
+            with open(os.path.join(out, extra), "rb") as f: yield extra, f.read()
+    blocks, lines = [], []
+    for src, buf in _sources():
+        dom, url, ip = grep_iocs(buf)
+        blocks.append(f"[{src}]\ndomains: {', '.join(dom)}\nurls: {', '.join(url)}\nips: {', '.join(ip)}\n")
+        lines.append(f"[IOC] {src}: domains={dom or '-'}  urls={url or '-'}  ips={ip or '-'}")
+    with open(os.path.join(out, "iocs.txt"), "w", encoding="utf-8", errors="backslashreplace") as f:
+        f.write("\n".join(blocks))       # write before printing: a console failure must not lose the file
+    for ln in lines: print(ln)
     print(f"[+] DONE -> {out}")
 
 if __name__ == "__main__":

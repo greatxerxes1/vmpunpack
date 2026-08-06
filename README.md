@@ -24,8 +24,10 @@ emulation-root ordinal-import gaps** so a fresh sample just works.
 
    Already cloned without it? `git lfs install && git lfs pull` fixes the checkout in place.
 
-2. Install **Python 3** and make sure `python` is on `PATH`. *(That's the only other dependency — the patched
-   engine and the emulation root are already in the tree.)*
+2. Install **Python 3.8+**. *(That's the only other dependency — the patched engine and the emulation root
+   are already in the tree.)* `RUN_ME.cmd` finds it by running `py -3`, then `python`, and reading what the
+   interpreter prints — so a Windows Store alias stub or a stray Python 2 on `PATH` is rejected with a clear
+   message instead of half-starting.
 
 3. Run it:
 
@@ -40,7 +42,7 @@ resolves its engine paths relative to itself, so it works from wherever you clon
 
 | flag | meaning |
 |---|---|
-| `-o OUTDIR` | output dir (default `<sample>_unpacked`) |
+| `-o OUTDIR` | output dir (default `<sample>_unpacked`); it is cleared of previous artefacts each run, so it must not be `C:\dumps` |
 | `--run-payload` | run PAST OEP and capture behaviour (network / files / registry) instead of freezing at OEP |
 | `--nodelay` | neutralize anti-sandbox `NtDelayExecution` sleeps |
 | `--tsc 0x8000` | advance rdtsc by a stride per call (collapse rdtsc delay loops) |
@@ -55,11 +57,32 @@ resolves its engine paths relative to itself, so it works from wherever you clon
 |---|---|
 | `<name>.unpacked.exe` | reconstructed PE, entry set to the real OEP — load in IDA/Ghidra (image base `0x140000000`) |
 | `unpacked.bin` / `.meta` | raw memory image + base / SizeOfImage / entry / OEP |
-| `iocs.txt` | domains / URLs / IPs grepped from the image |
+| `iocs.txt` | domains / URLs / IPs, in a per-source section for **every** dump produced this run |
 | `unpacked_late.bin`, `heap.bin` | only with `--late` |
 
 The reconstructed PE is an **analysis** image (its IAT holds emulator addresses), not guaranteed runnable
 elsewhere without a Scylla-style IAT rebuild.
+
+IOC extraction scans each dump as single-byte text and as UTF-16 at both even and odd alignments, so
+wide-string URLs and IPs are caught too. Hosts are filtered against an anchored list of known-noise domains
+(certificate CAs, Microsoft endpoints); a C2 that merely *looks* Microsoft-ish, like
+`windows-defender-update[.]top`, is reported rather than suppressed.
+
+### Run one at a time
+
+`C:\dumps` is a fixed scratch path — it is compiled into `analyzer.exe`, so no flag relocates it and every
+invocation on the machine shares it. **Do not run two unpacks concurrently.** The tool now refuses to publish
+a dump it cannot prove belongs to the current run, checking that the dump post-dates the run's start and that
+the `.meta`'s `size_of_image` and `entry_rva` match the target's own headers. If you see
+
+```
+[!] the dump does not describe this target - refusing to publish it
+```
+
+another run is sharing `C:\dumps`. It also aborts up front rather than continuing if a stale dump cannot be
+deleted (something still holds it open), and refuses to emit a `.unpacked.exe` when the dumped header page is
+missing its `MZ`/`PE` signature — the packer erased it, and the raw `unpacked.bin` + `.meta` in the output dir
+are what you rebuild from by hand.
 
 ## How it works
 
@@ -109,4 +132,8 @@ workstation. Worth knowing before you read anything into `SAM`/`SECURITY`.
 - **Live C2 is usually runtime-only** (e.g. resolved via DoH) and not in the dump — use `--run-payload`
   (best-effort; the emulator has no real network) or run the unpacked PE in a net-connected sandbox / RE the resolver.
 - New samples may import a *different* function by ordinal; the auto gap-fill covers empty slots. `patch_ordinal.py
-  <emuroot-dll> <ordinal>` is the manual version for anything exotic.
+  <emuroot-dll> <ordinal>` is the manual version for anything exotic. It fills **empty** slots only and keeps a
+  `.bak`; overwriting a live export needs `--force` and silently changes that API for every later run against
+  this emulation root, so `git status` / `git checkout --` on `emu_root/` is your undo.
+- An ordinal outside a DLL's export range cannot be gap-filled by either tool — the emulation root ships a
+  different build of that DLL than the sample was linked against, and the run prints the range it does export.

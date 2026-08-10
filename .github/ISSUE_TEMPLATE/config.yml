@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/milk-analyzer/vmpunpack/security/advisories/new
+    about: Report privately instead of opening a public issue. See SECURITY.md.
+  - name: Emulator (sogen) bug
+    url: https://github.com/momo5502/sogen/issues
+    about: Crashes inside the emulator itself, or unsupported Windows APIs, belong upstream.

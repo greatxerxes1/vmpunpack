@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The analysis task you are stuck on, not the solution you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like vmpunpack to do
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      description: vmpunpack unpacks; it does not devirtualize, and it stays stdlib-only.
+      options:
+        - label: This does not require a third-party Python package
+        - label: This is not a request to recover pre-VMP assembly from virtualized code

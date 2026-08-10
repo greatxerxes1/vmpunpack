@@ -1,8 +1,12 @@
-# runtime scratch: vmpunpack.py copies the target sample into the guest FS here on every run
-emu_root/root/filesys/c/sample/
+# Third-party engine and emulation root: fetched by setup.cmd, never committed.
+# sogen is GPL-2.0 and emu_root is a capture of Microsoft Windows system files;
+# neither is ours to redistribute. See THIRD_PARTY.md.
+/sogen/
+/emu_root/
 
 # tool output next to a sample
 *_unpacked/
 
 __pycache__/
 *.pyc
+.pytest_cache/

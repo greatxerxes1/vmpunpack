@@ -1,139 +1,129 @@
+<div align="center">
+
 # vmpunpack
 
-Self-contained generic **VMProtect / basic-packer unpacker** for x64 PEs. One command, runs **locally on any
-analysis VM**.
+**Generic VMProtect / packer unpacker for x64 PE malware.**
 
-It runs the target through a patched [sogen](https://github.com/momo5502/sogen) emulator (which sails past
-VMProtect's anti-VM / anti-debug that bail on any.run / CAPE / bare metal), drives the packer stub to the
-**original OEP**, dumps the fully-unpacked image, reconstructs a loadable PE, greps IOCs, and **auto-fills
-emulation-root ordinal-import gaps** so a fresh sample just works.
+[![CI](https://github.com/milk-analyzer/vmpunpack/actions/workflows/ci.yml/badge.svg)](https://github.com/milk-analyzer/vmpunpack/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](#requirements)
 
-> Unpacks/decompresses — it does **not** devirtualize. VMProtect-virtualized functions stay VM bytecode; you
-> get a working, analyzable image with the VM intact, not the original pre-VMP assembly.
+**English** · [Русский](README.ru.md) · [简体中文](README.zh-CN.md)
 
-## Quick start
+</div>
 
-1. Install **[Git LFS](https://git-lfs.com) before cloning**. The 188 MB `SOFTWARE` registry hive is an LFS
-   object (it is over GitHub's hard 100 MB per-file limit); clone without LFS and you get a two-line pointer
-   file in its place, and the emulator dies on guest startup with a confusing registry error.
+---
 
-   ```bat
-   git lfs install
-   git clone https://github.com/milk-analyzer/vmpunpack.git
-   ```
+One command turns a packed x64 PE into a loadable, analysable image.
 
-   Already cloned without it? `git lfs install && git lfs pull` fixes the checkout in place.
+vmpunpack runs the sample inside a patched [sogen](https://github.com/momo5502/sogen) emulator — which
+walks past the anti-VM and anti-debug checks that make VMProtect bail on any.run, CAPE and bare metal —
+drives the packer stub to the **original entry point (OEP)**, dumps memory there, rebuilds a PE for
+IDA/Ghidra, and greps IOCs.
 
-2. Install **Python 3.8+**. *(That's the only other dependency — the patched engine and the emulation root
-   are already in the tree.)* `RUN_ME.cmd` finds it by running `py -3`, then `python`, and reading what the
-   interpreter prints — so a Windows Store alias stub or a stray Python 2 on `PATH` is rejected with a clear
-   message instead of half-starting.
+> **It unpacks. It does not devirtualize.** VMProtect-virtualized functions stay VM bytecode. You get a
+> working image with the VM intact, not the original pre-VMP assembly.
 
-3. Run it:
+## Install
 
-   ```bat
-   RUN_ME.cmd C:\samples\thing.exe
-   ```
+```bat
+git clone https://github.com/milk-analyzer/vmpunpack.git
+cd vmpunpack
+setup.cmd
+```
 
-Output lands in `<sample>_unpacked\` next to the sample. The checkout is location-independent — the tool
-resolves its engine paths relative to itself, so it works from wherever you cloned it.
+`setup.cmd` fetches the two third-party pieces this repository does not redistribute — roughly 500 MB,
+once:
 
-## Flags
+- the **emulation root** from [sogen.dev](https://sogen.dev/root.zip): a captured Windows userland the
+  emulator boots against;
+- the **patched emulator** from [milk-analyzer/sogen](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.0),
+  pinned by SHA-256. Stock upstream sogen will not work — the unpack hooks live in the emulator, not in
+  this Python — and that build is GPL-2.0, so its source is published on the
+  [`vmpunpack` branch](https://github.com/milk-analyzer/sogen/tree/vmpunpack) of that fork.
+
+`setup.cmd --check` verifies an existing install at any time. `--analyzer-url <zip>` substitutes your
+own build. See [THIRD_PARTY.md](THIRD_PARTY.md).
+
+### Requirements
+
+Windows x64, Python 3.8+. Nothing else — the tool is stdlib-only so it runs on locked-down analysis VMs.
+
+## Use
+
+```bat
+RUN_ME.cmd C:\samples\thing.exe
+```
+
+Output lands in `<sample>_unpacked\` next to the sample.
+
+> **Run one sample at a time.** `C:\dumps` is a fixed scratch path compiled into the emulator, so every
+> invocation on the machine shares it. Two concurrent runs are detected and refused, not silently mixed.
+
+### Flags
 
 | flag | meaning |
 |---|---|
-| `-o OUTDIR` | output dir (default `<sample>_unpacked`); it is cleared of previous artefacts each run, so it must not be `C:\dumps` |
-| `--run-payload` | run PAST OEP and capture behaviour (network / files / registry) instead of freezing at OEP |
+| `-o OUTDIR` | output dir (default `<sample>_unpacked`); cleared of stale artefacts each run, so it must not be `C:\dumps` |
+| `--run-payload` | run past OEP and capture behaviour instead of freezing there |
 | `--nodelay` | neutralize anti-sandbox `NtDelayExecution` sleeps |
-| `--tsc 0x8000` | advance rdtsc by a stride per call (collapse rdtsc delay loops) |
-| `--oep 0xRVA` | force the OEP RVA (override the heuristic; the log prints every candidate section) |
+| `--tsc 0x8000` | advance rdtsc by a stride per call, collapsing rdtsc delay loops |
+| `--oep 0xRVA` | force the OEP RVA, overriding the heuristic |
 | `--late N` | also dump `unpacked_late.bin` + `heap.bin` after N post-OEP blocks (runtime-decrypted config) |
-| `--timeout SEC` | run cap (default 300) |
-| `--sogen DIR` / `--emuroot DIR` | override engine paths (default: `sogen/` and `emu_root/root/` in the checkout) |
+| `--timeout SEC` | run cap, default 300 |
+| `--sogen DIR` / `--emuroot DIR` | engine paths, if you keep them outside the checkout |
 
-## Output
+### Output
 
 | file | what |
 |---|---|
-| `<name>.unpacked.exe` | reconstructed PE, entry set to the real OEP — load in IDA/Ghidra (image base `0x140000000`) |
+| `<name>.unpacked.exe` | reconstructed PE, entry set to the real OEP |
 | `unpacked.bin` / `.meta` | raw memory image + base / SizeOfImage / entry / OEP |
-| `iocs.txt` | domains / URLs / IPs, in a per-source section for **every** dump produced this run |
+| `iocs.txt` | domains, URLs and IPs, in a section per dump |
 | `unpacked_late.bin`, `heap.bin` | only with `--late` |
 
-The reconstructed PE is an **analysis** image (its IAT holds emulator addresses), not guaranteed runnable
-elsewhere without a Scylla-style IAT rebuild.
+The reconstructed PE is an **analysis** image: its IAT holds emulator addresses, so it is not guaranteed
+to run elsewhere without a Scylla-style IAT rebuild.
 
-IOC extraction scans each dump as single-byte text and as UTF-16 at both even and odd alignments, so
-wide-string URLs and IPs are caught too. Hosts are filtered against an anchored list of known-noise domains
-(certificate CAs, Microsoft endpoints); a C2 that merely *looks* Microsoft-ish, like
-`windows-defender-update[.]top`, is reported rather than suppressed.
-
-### Run one at a time
-
-`C:\dumps` is a fixed scratch path — it is compiled into `analyzer.exe`, so no flag relocates it and every
-invocation on the machine shares it. **Do not run two unpacks concurrently.** The tool now refuses to publish
-a dump it cannot prove belongs to the current run, checking that the dump post-dates the run's start and that
-the `.meta`'s `size_of_image` and `entry_rva` match the target's own headers. If you see
-
-```
-[!] the dump does not describe this target - refusing to publish it
-```
-
-another run is sharing `C:\dumps`. It also aborts up front rather than continuing if a stale dump cannot be
-deleted (something still holds it open), and refuses to emit a `.unpacked.exe` when the dumped header page is
-missing its `MZ`/`PE` signature — the packer erased it, and the raw `unpacked.bin` + `.meta` in the output dir
-are what you rebuild from by hand.
+IOC extraction reads each dump as single-byte text and as UTF-16 at both alignments, so wide-string URLs
+and IPs are caught. Hosts are filtered against an anchored list of known-noise domains; a C2 that merely
+looks Microsoft-ish, like `windows-defender-update[.]top`, is reported, not suppressed.
 
 ## How it works
 
-1. **Backend `unicorn` + `--no-inst-precision`** — sogen defaults to per-instruction hooks (single-step, slow);
-   this lets unicorn (TCG) JIT, so the whole stub + decompression finishes in ~2 min instead of never.
-2. **OEP detection** — arms an address-execution hook on the target's original code section (the lowest-RVA
-   executable section that does **not** contain the packer entry point). First hit there = OEP → dump the image.
-   All addresses come from the target PE headers, nothing is hard-coded.
-3. **Ordinal gap-fill** — before running, scans the target's imports for `#ORD` entries and, if the emulation-root
-   DLL leaves that ordinal an empty export slot, points it at a ret-stub so the loader can snap it (otherwise a
-   fresh sample dies with `Emulation terminated with status C0000138` / `STATUS_ORDINAL_NOT_FOUND`).
+1. **`unicorn` backend, `--no-inst-precision`.** sogen defaults to per-instruction hooks; letting the
+   TCG JIT run finishes the stub and its decompression in about two minutes instead of never.
+2. **OEP detection.** An execution hook is armed on the target's original code section — the lowest-RVA
+   executable section that does not contain the packer entry point. The first hit there is the OEP.
+   Every address comes from the target's own headers; nothing is hard-coded.
+3. **Ordinal gap-fill.** Imports are scanned for `#ORD` entries; where the emulation root's DLL leaves
+   that ordinal an empty export slot, it is pointed at a `ret` stub so the guest loader can snap it.
+   Without this a fresh sample dies with `STATUS_ORDINAL_NOT_FOUND` (`C0000138`).
 
-## What's in the repo
+## Limits
 
+- Not a devirtualizer.
+- Full-program virtualization, multi-stage loaders and TLS-callback tricks may need `--oep`, `--late`,
+  a larger `--timeout`, or manual work.
+- **Live C2 is usually runtime-only** (resolved via DoH, say) and absent from the dump. `--run-payload`
+  is best-effort — the emulator has no real network.
+- x64 only. 32-bit targets are rejected rather than misparsed.
+- If the packer erases its own header page before jumping to OEP, no loadable PE can be rebuilt; the raw
+  `unpacked.bin` and `.meta` are still written for a manual rebuild.
+
+## Project
+
+[Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Changelog](CHANGELOG.md) ·
+[Third-party licences](THIRD_PARTY.md)
+
+Tests need neither the engine nor a sample — every fixture is a synthetic PE built in memory:
+
+```bat
+py -3 tests\run_tests.py
+py -3 tests\run_tests2.py
+powershell -ExecutionPolicy Bypass -File tests\launcher.ps1
 ```
-vmpunpack/
-  RUN_ME.cmd     top launcher (checks python, creates C:\dumps scratch, calls the tool)
-  README.md      this file
-  vmpunpack/     the tool (vmpunpack.py, vmpunpack.cmd, patch_ordinal.py)
-  sogen/         patched analyzer.exe + runtime DLLs + Ghidra specs  (~18 MB)
-  emu_root/      Windows system DLLs + registry the emulator boots against  (~464 MB, LFS)
-```
 
-Everything needed to run is committed — nothing is fetched at runtime. `C:\dumps\` is used only as transient
-scratch (auto-created). `emu_root/root/filesys/c/sample/` is gitignored: `vmpunpack.py` copies the target
-sample into the guest filesystem there on every run, so it must not be tracked.
-
-> **Note:** stock sogen from upstream will **not** work — this needs the patched `analyzer.exe` in this repo
-> (unpack / OEP-dump / ordinal-gap-fill hooks).
-
-### About `emu_root/`
-
-A captured Windows userland the emulator boots against: system DLLs under `root/filesys/`, plus real registry
-hives under `root/registry/` (`SYSTEM`, `SOFTWARE`, `SAM`, `SECURITY`, `NTUSER.DAT`). Guest `ntdll` and
-`kernel32` read the registry during process init, so the hives have to be genuine ones rather than stubs —
-they get captured wholesale, which is why account-related hives are in there at all.
-
-This root was captured from a **GitHub Actions Windows runner image** (hence the `runneradmin` account, the
-`runnervmhisb5` machine name, and the lone `c/users/runneradmin` profile) — an ephemeral CI VM, not anyone's
-workstation. Worth knowing before you read anything into `SAM`/`SECURITY`.
-
-## Caveats
-
-- Not a devirtualizer (see top).
-- Full-program virtualization, multi-stage loaders, or TLS-callback tricks may need `--oep`, `--late`, a bigger
-  `--timeout`, or manual work.
-- **Live C2 is usually runtime-only** (e.g. resolved via DoH) and not in the dump — use `--run-payload`
-  (best-effort; the emulator has no real network) or run the unpacked PE in a net-connected sandbox / RE the resolver.
-- New samples may import a *different* function by ordinal; the auto gap-fill covers empty slots. `patch_ordinal.py
-  <emuroot-dll> <ordinal>` is the manual version for anything exotic. It fills **empty** slots only and keeps a
-  `.bak`; overwriting a live export needs `--force` and silently changes that API for every later run against
-  this emulation root, so `git status` / `git checkout --` on `emu_root/` is your undo.
-- An ordinal outside a DLL's export range cannot be gap-filled by either tool — the emulation root ships a
-  different build of that DLL than the sample was linked against, and the run prints the range it does export.
+MIT, for the driver and launchers in this repository. The emulator and emulation root it downloads carry
+their own licences — [THIRD_PARTY.md](THIRD_PARTY.md).

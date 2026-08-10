@@ -1,3 +1,5 @@
-# 188 MB registry hive — over GitHub's hard 100 MB per-file limit, so it has to ride LFS.
-# Everything else stays in regular git objects to keep the LFS quota free.
-emu_root/root/registry/SOFTWARE filter=lfs diff=lfs merge=lfs -text
+# Normalise text in the repo, keep Windows line endings for the cmd launchers.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

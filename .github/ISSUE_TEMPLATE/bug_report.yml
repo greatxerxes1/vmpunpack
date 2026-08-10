@@ -1,0 +1,59 @@
+name: Bug report
+description: vmpunpack crashed, produced a wrong dump, or failed on a sample
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not attach the malware sample.** Link to VirusTotal or Malware Bazaar by hash instead.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: cmdline
+    attributes:
+      label: Command line
+      placeholder: RUN_ME.cmd C:\samples\thing.exe --nodelay --tsc 0x8000
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Full output
+      description: Everything vmpunpack printed, including any `[analyzer stderr]` block.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: sample
+    attributes:
+      label: Sample SHA-256
+      description: A hash or a VirusTotal link — not the file.
+    validations:
+      required: false
+
+  - type: input
+    id: versions
+    attributes:
+      label: vmpunpack commit and Python version
+      placeholder: 1073df0, Python 3.11.0
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: "`setup.cmd --check` reports the engine and emulation root as complete"
+          required: true
+        - label: Only one vmpunpack run was in progress (they share `C:\dumps`)
+          required: true

@@ -1,5 +1,7 @@
 import argparse, os, re, struct, subprocess, sys, shutil, time
 
+__version__ = "0.2.0.dev0"
+
 DUMPS = r"C:\dumps"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DUMP_FILES = ("unpacked.bin", "unpacked.meta", "unpacked_late.bin", "heap.bin")
@@ -285,11 +287,19 @@ def main():
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--sogen", default=os.path.join(_ROOT, "sogen"))
     ap.add_argument("--emuroot", default=os.path.join(_ROOT, "emu_root", "root"))
+    ap.add_argument("--version", action="version", version=f"vmpunpack {__version__}")
     args = ap.parse_args()
 
     os.makedirs(DUMPS, exist_ok=True)
     if not os.path.isfile(args.target): sys.exit(f"[!] target not found: {args.target}")
-    if not os.path.isfile(os.path.join(args.sogen, "analyzer.exe")): sys.exit(f"[!] analyzer.exe not in {args.sogen}")
+    missing = [p for p in (os.path.join(args.sogen, "analyzer.exe"),
+                           os.path.join(args.emuroot, "registry"),
+                           os.path.join(args.emuroot, "filesys")) if not os.path.exists(p)]
+    if missing:
+        sys.exit("[!] the engine or emulation root is not installed:\n"
+                 + "".join(f"    missing {p}\n" for p in missing)
+                 + "    Run setup.cmd to fetch them (they are third-party and not part of this repo),\n"
+                 "    or pass --sogen/--emuroot if you keep them elsewhere. See THIRD_PARTY.md.")
     for k in ("tsc", "oep"):
         v = getattr(args, k)
         if v is not None and not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{1,16}", v):

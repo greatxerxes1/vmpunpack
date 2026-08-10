@@ -1,10 +1,13 @@
-import argparse, os, re, struct, subprocess, sys, shutil, time
+import argparse, atexit, hashlib, os, re, struct, subprocess, sys, shutil, time
 
 __version__ = "0.2.0.dev0"
 
 DUMPS = r"C:\dumps"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DUMP_FILES = ("unpacked.bin", "unpacked.meta", "unpacked_late.bin", "heap.bin")
+# Written by the engine but not consumed here. Cleared best-effort only: a leftover one is noise,
+# not a correctness problem, so it must never abort a run the way a stale DUMP_FILES entry does.
+SCRATCH_FILES = ("sogen_image.bin", "vmp_run.jsonl", "vmp_guest.txt")
 META_KEYS = ("base", "size_of_image", "entry_rva", "oep_rva")
 MTIME_SLACK = 2.0          # filesystem timestamp granularity; keeps the staleness floor from false-firing
 MAX_DESCRIPTORS = 4096     # bounds on the import walk: every byte of it is attacker-controlled
@@ -13,6 +16,14 @@ MAX_ORDINALS = 4096
 MAX_THUNK_READS = 1 << 20  # budget across ALL descriptors: the per-dimension caps multiply otherwise
 
 class BadPE(Exception): pass
+
+def _page_up(x): return (x + 0xfff) & ~0xfff
+
+def sha256_file(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(chunk), b""): h.update(blk)
+    return h.hexdigest()
 
 def u16(b, o): return struct.unpack_from("<H", b, o)[0]
 def u32(b, o): return struct.unpack_from("<I", b, o)[0]
@@ -199,9 +210,67 @@ def grep_iocs(b, chunk=64 << 20, overlap=1 << 12):
         _scan(seg[1:].decode("utf-16le", "ignore"), dom, url, ip)   # wide, odd-aligned
     return sorted(dom), sorted(url), sorted(ip)
 
+def acquire_lock(timeout):
+    """C:\\dumps is shared by every invocation on the machine and its path is compiled into
+    analyzer.exe. Two runs interleave on the same four filenames, and the identity checks cannot
+    catch it when both runs are of the same sample. Enforce the rule the README states."""
+    os.makedirs(DUMPS, exist_ok=True)
+    lock = os.path.join(DUMPS, ".lock")
+    def _take():
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"pid={os.getpid()} started={time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                     f"argv={' '.join(sys.argv[1:])}".encode("latin1", "replace"))
+        os.close(fd)
+        atexit.register(lambda: os.path.isfile(lock) and os.remove(lock))
+    try:
+        return _take()
+    except FileExistsError:
+        pass
+    try:
+        with open(lock, encoding="latin1") as f: held = f.read().strip()
+        age = time.time() - os.path.getmtime(lock)
+    except OSError:
+        held, age = "<unreadable>", 0.0
+    mine = f"pid={os.getpid()} " in held + " "
+    if not mine and age <= timeout + 60:
+        sys.exit(f"[!] another vmpunpack run holds {lock} ({int(age)}s ago):\n"
+                 f"    {held}\n"
+                 f"    {DUMPS} is shared and its path is baked into analyzer.exe, so runs must be\n"
+                 f"    sequential. Wait for it, or delete the lock if that run is gone.")
+    if not mine:
+        print(f"[!] taking over a lock left behind {int(age)}s ago by: {held}")
+    try: os.remove(lock)
+    except OSError as e: sys.exit(f"[!] cannot remove the lock {lock}: {e}")
+    _take()
+
+def guest_filename(target):
+    """The engine identifies the target module by a case-sensitive '.exe'/'.EXE' suffix, so a sample
+    named by its hash - the norm in triage - would arm nothing and produce no dump. Present it to the
+    guest under a name the engine recognises."""
+    name = os.path.basename(target)
+    return name if name.lower().endswith(".exe") else name + ".exe"
+
+def guest_drop_dir(emuroot):
+    """Where the sample appears to the guest, as (host path, guest path).
+
+    Nothing arrives at C:\\sample\\ in a real infection - it is the one identifying artefact vmpunpack
+    itself adds to an otherwise stock emulation root, and it costs nothing to drop the file somewhere
+    a download would actually land. The profile name is discovered, not assumed, so this follows
+    whatever root is installed."""
+    users = os.path.join(emuroot, "filesys", "c", "users")
+    skip = {"public", "default", "defaultuser0", "all users", "default user"}
+    if os.path.isdir(users):
+        for d in sorted(os.listdir(users)):
+            if d.lower() not in skip and os.path.isdir(os.path.join(users, d)):
+                return os.path.join(users, d, "downloads"), f"C:\\Users\\{d}\\Downloads"
+    return os.path.join(emuroot, "filesys", "c", "windows", "temp"), "C:\\Windows\\Temp"
+
 def run_analyzer(args):
-    guest_name = os.path.basename(args.target)
-    guest_dir = os.path.join(args.emuroot, "filesys", "c", "sample")
+    guest_name = guest_filename(args.target)
+    if guest_name != os.path.basename(args.target):
+        print(f"[i] presenting the sample to the guest as {guest_name} "
+              "(the engine identifies its target by an .exe suffix)")
+    guest_dir, guest_prefix = guest_drop_dir(args.emuroot)
     os.makedirs(guest_dir, exist_ok=True)
     shutil.copy(args.target, os.path.join(guest_dir, guest_name))
     for f in DUMP_FILES:
@@ -212,18 +281,23 @@ def run_analyzer(args):
             sys.exit(f"[!] cannot clear stale dump {p}: {e}\n"
                      "    Close whatever holds it open and re-run. Refusing to continue rather than risk\n"
                      "    publishing a previous sample's image as this one's result.")
+    for f in SCRATCH_FILES:
+        try: os.remove(os.path.join(DUMPS, f))
+        except OSError: pass
     env = dict(os.environ); env["SOGEN_UNPACK"] = "1"
     for k in ("SOGEN_STOP_AT_OEP", "SOGEN_NODELAY", "SOGEN_TSC_STRIDE", "SOGEN_OEP_RVA", "SOGEN_LATEDUMP_AT"):
         env.pop(k, None)
     if not args.run_payload: env["SOGEN_STOP_AT_OEP"] = "1"
     if args.nodelay: env["SOGEN_NODELAY"] = "1"
-    if args.tsc: env["SOGEN_TSC_STRIDE"] = args.tsc
-    if args.oep: env["SOGEN_OEP_RVA"] = args.oep
+    # The engine parses these with strtoull(base 0), so a bare "b3dc" would arrive as 0 and "08000"
+    # as an invalid octal. The flags accept hex with or without the prefix; normalise before handing over.
+    if args.tsc: env["SOGEN_TSC_STRIDE"] = hex(int(args.tsc, 16))
+    if args.oep: env["SOGEN_OEP_RVA"] = hex(int(args.oep, 16))
     if args.late: env["SOGEN_LATEDUMP_AT"] = str(args.late)
     cmd = [os.path.join(args.sogen, "analyzer.exe"), "--backend", "unicorn", "--no-inst-precision",
            "-e", args.emuroot, "-r", os.path.join(args.emuroot, "registry"),
            "--report", os.path.join(DUMPS, "vmp_run.jsonl"), "--stdout", os.path.join(DUMPS, "vmp_guest.txt"),
-           "--first-exec", "-c", "C:\\sample\\" + guest_name]
+           "--first-exec", "-c", guest_prefix + "\\" + guest_name]
     dec = lambda s: s if isinstance(s, str) else (s.decode("latin1", "replace") if s else "")
     t0 = time.time() - MTIME_SLACK              # captured immediately before launch: the staleness floor
     try:
@@ -270,6 +344,45 @@ def gap_fill(args, ords):
             else:
                 print(f"[!] {dll}#{ordv}: the emulation root's copy has no readable export directory.")
 
+def check_oep(img, m, args, log):
+    """The OEP is the one value in the meta with no independent check, and the whole result hangs on
+    it. The engine dumps on the first execution anywhere in the chosen section, with no corroboration,
+    so a stub-entry dump satisfies every other gate. Catch the cases that are detectable from here."""
+    oep = m["oep_rva"]
+    # dump_mem writes [base, base+SizeOfImage) contiguously, so a file offset IS the RVA
+    if oep + 16 <= len(img) and not any(img[oep:oep+16]):
+        sys.exit(f"[!] the 16 bytes at oep_rva 0x{oep:x} are all zero - that page was never recovered.\n"
+                 "    Refusing to publish an image whose entry point is empty.")
+    if args.oep and oep != int(args.oep, 16):
+        sys.exit(f"[!] --oep 0x{int(args.oep, 16):x} was requested but the dump was taken at 0x{oep:x}.\n"
+                 "    The engine hooks that exact address, so the two can only disagree if the installed\n"
+                 "    analyzer.exe predates that behaviour and still hooks the whole section containing\n"
+                 "    the RVA. Refusing to publish. Run setup.cmd --force to refresh the engine.")
+    if oep == m["entry_rva"]:
+        print(f"[!] oep_rva == entry_rva (0x{oep:x}): the dump was taken at the packer's own entry point,")
+        print("    so nothing was unpacked. Treat this result as suspect.")
+    try:
+        secs = sections(bytearray(img))
+        hit = next((s for s in secs if s["va"] <= oep < s["va"] + max(s["vs"], s["rs"])), None)
+        if hit is None:
+            print(f"[!] oep_rva 0x{oep:x} falls outside every section of the dump")
+        else:
+            print(f"[i] OEP is in section {hit['name']!r} (rva 0x{hit['va']:x})")
+            if not hit["ch"] & 0x20000000:
+                print(f"[!] that section is not marked executable - the OEP heuristic likely misfired")
+    except (BadPE, struct.error):
+        pass
+    # The engine already counted readable pages; the line goes to stdout, which is discarded on success.
+    # Anchored on the filename: a bare "N/M pages" search would happily pick up any other dump line the
+    # engine prints first - which is exactly how an earlier diagnostic dump's page count got reported
+    # as the image-recovery rate.
+    mm = re.search(r"unpacked\.bin\s*:\s*(\d+)\s*/\s*(\d+)\s+pages", log)
+    if mm and int(mm.group(2)):
+        good, total = int(mm.group(1)), int(mm.group(2))
+        pct = 100 * good // total
+        print(f"[i] image recovered: {good}/{total} pages ({pct}%)")
+        if pct < 50: print("    [!] most of the image was unreadable; the dump is largely zeros")
+
 def main():
     # Sample-derived text (import DLL names) and the analyzer's latin1-decoded stderr both get printed.
     # Under a redirect stdout uses the ANSI codepage, where 0x80-0x9F is unencodable in every variant.
@@ -314,8 +427,23 @@ def main():
     except (BadPE, struct.error) as e:
         sys.exit(f"[!] unparseable PE headers in target: {e}")
     if not pb["is64"]:
-        sys.exit("[!] target is a 32-bit PE. This tool and the bundled emulation root are x64-only.")
+        sys.exit("[!] target is a 32-bit PE. This tool and the bundled emulation root are x64-only.\n"
+                 "    For 32-bit packers use x32dbg + Scylla, or unipacker.")
+    # The late dump is taken N basic blocks PAST the OEP, and without --run-payload the emulator is
+    # stopped at the OEP, so there are none. The combination is inert rather than merely useless.
+    if args.late is not None and not args.run_payload:
+        sys.exit("[!] --late needs --run-payload: it dumps N basic blocks past the OEP, and without\n"
+                 "    --run-payload the emulator stops at the OEP and never executes any.\n"
+                 "    Note that --run-payload means the sample runs past its entry point.")
+    if args.oep and not (0 < int(args.oep, 16) < pb["size_of_image"]):
+        sys.exit(f"[!] --oep 0x{int(args.oep, 16):x} is outside the image "
+                 f"(size_of_image=0x{pb['size_of_image']:x}) - a typo fails now rather than after "
+                 f"{args.timeout}s.")
     print(f"[i] target base=0x{pb['base']:x} entry_rva=0x{pb['entry_rva']:x} size_of_image=0x{pb['size_of_image']:x}")
+
+    # Taken before the gap-fill, not just before the run: gap_fill rewrites DLLs inside the emulation
+    # root, which every invocation on the machine shares just as C:\dumps does.
+    acquire_lock(args.timeout)
 
     try:
         ords = ordinal_imports(tgt)
@@ -357,7 +485,11 @@ def main():
         m = {k: int(meta[k], 16) for k in META_KEYS}
     except ValueError as e:
         sys.exit(f"[!] unpacked.meta holds a non-hex value ({e}) - refusing to publish.")
-    if m["size_of_image"] != pb["size_of_image"] or m["entry_rva"] != pb["entry_rva"]:
+    # The loader page-aligns SizeOfImage, so the meta legitimately carries the rounded-up value while
+    # the on-disk header may not be aligned at all - a known anti-analysis malformation, i.e. exactly
+    # this tool's input. Accept either; keep entry_rva strict, it is not transformed.
+    if m["size_of_image"] not in (pb["size_of_image"], _page_up(pb["size_of_image"])) \
+            or m["entry_rva"] != pb["entry_rva"]:
         sys.exit("[!] the dump does not describe this target - refusing to publish it:\n"
                  f"    target: size_of_image=0x{pb['size_of_image']:x} entry_rva=0x{pb['entry_rva']:x}\n"
                  f"    dump  : size_of_image=0x{m['size_of_image']:x} entry_rva=0x{m['entry_rva']:x}\n"
@@ -389,11 +521,14 @@ def main():
     # or a torn .bin/.meta pair from a concurrent run still gets through
     try:
         ib = pe_basics(img)
-        if ib["size_of_image"] != m["size_of_image"] or ib["entry_rva"] != m["entry_rva"]:
+        if ib["size_of_image"] not in (m["size_of_image"], _page_up(m["size_of_image"])) \
+                and m["size_of_image"] != _page_up(ib["size_of_image"]) \
+                or ib["entry_rva"] != m["entry_rva"]:
             sys.exit("[!] unpacked.bin's own headers disagree with unpacked.meta - the two files come from\n"
                      f"    different runs sharing {DUMPS}. Refusing to publish.")
     except (BadPE, struct.error):
         pass                        # erased header page: the reconstruct_pe path below reports it
+    check_oep(img, m, args, log)
     if len(img) != m["size_of_image"]:
         print(f"[!] dump is 0x{len(img):x} bytes but SizeOfImage is 0x{m['size_of_image']:x} - size mismatch;")
         print("    section raw sizes are clamped to what is actually present.")
@@ -416,8 +551,16 @@ def main():
         dom, url, ip = grep_iocs(buf)
         blocks.append(f"[{src}]\ndomains: {', '.join(dom)}\nurls: {', '.join(url)}\nips: {', '.join(ip)}\n")
         lines.append(f"[IOC] {src}: domains={dom or '-'}  urls={url or '-'}  ips={ip or '-'}")
+    # Name the sample in the file itself. iocs.txt has a fixed name, so a shared -o overwrites it and
+    # an unlabelled set of C2 domains is one copy-paste away from being attributed to the wrong sample.
+    head = (f"# vmpunpack {__version__}\n"
+            f"# sample: {os.path.basename(args.target)}\n"
+            f"# sha256: {sha256_file(args.target)}\n"
+            f"# oep_rva: 0x{m['oep_rva']:x}   base: 0x{m['base']:x}\n"
+            f"# flags: {' '.join(sys.argv[1:])}\n"
+            f"# utc: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n\n")
     with open(os.path.join(out, "iocs.txt"), "w", encoding="utf-8", errors="backslashreplace") as f:
-        f.write("\n".join(blocks))       # write before printing: a console failure must not lose the file
+        f.write(head + "\n".join(blocks))  # write before printing: a console failure must not lose the file
     for ln in lines: print(ln)
     print(f"[+] DONE -> {out}")
 

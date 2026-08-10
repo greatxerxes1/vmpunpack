@@ -8,6 +8,43 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The pinned engine is now `vmpunpack-1.0.1`. It fixes a host-pointer dereference of a guest-authored
+  exception record, de-hardcodes the self-modification write window (previously two literals from one
+  sample, which also granted write during ordinary sogen runs), makes `SOGEN_OEP_RVA` hook the exact
+  address instead of the whole section containing it, stops the emulator rather than one vCPU at the
+  OEP, refuses to write `unpacked.meta` when the image dump failed, and gates the `[DIAG]` scaffolding.
+  See the [release notes](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.1).
+- `--late` now requires `--run-payload`. Without it the emulator stops at the OEP, so there are no
+  post-OEP basic blocks and the late dump could never be taken — the combination was silently inert.
+
+### Fixed
+
+- `--oep` and `--tsc` accepted hex without the `0x` prefix and forwarded it verbatim to an engine that
+  parses with `strtoull(base 0)`, so `--oep b3dc` arrived as 0 and `--tsc 08000` as an invalid octal.
+  Both are normalised now, and an `--oep` outside the image is rejected before the run rather than
+  after the timeout.
+- A sample whose `SizeOfImage` is not page-aligned — an anti-analysis malformation, i.e. this tool's
+  input — was refused with a message blaming a concurrent run. The loader's page-aligned value is now
+  accepted alongside the header's.
+- The OEP is a heuristic with no corroboration in the engine, so a dump taken at the packer's own entry
+  point satisfied every other check and published as a successful unpack. The driver now refuses an
+  image whose OEP page is empty, refuses a dump whose OEP is not the one `--oep` asked for, names the
+  section the OEP landed in, warns when that section is not executable or when the OEP equals the
+  packer entry, and reports the engine's readable-page ratio.
+
+### Added
+
+- A lock on `C:\dumps\.lock` for the duration of a run. The README already promised concurrent runs
+  were refused; the identity checks could not detect two runs of the *same* sample.
+- `iocs.txt` now opens with the sample name, its SHA-256, the OEP, the flags used and a UTC timestamp.
+  The file has a fixed name, so a shared `-o` overwrote it and left the C2 list unattributable.
+- `tests/run_tests3.py`: the `reconstruct_pe` round trip on a dump-shaped fixture (`PointerToRawData`
+  != `VirtualAddress`, a `vs >> rs` tail section, a `rs == 0` section), plus the OEP and locking
+  guards. Every earlier fixture had `rp == va`, which made the conversion the function exists for
+  indistinguishable from a no-op — three mutants that deleted it survived all 89 previous checks.
+
+### Changed
+
 - **The engine and emulation root are no longer committed.** `sogen/` (a patched GPL-2.0 build) and
   `emu_root/` (a capture of a Windows userland, ~464 MB) are now fetched by `setup.cmd` from their own
   publishers. The clone drops from ~464 MB to well under a megabyte, Git LFS is no longer needed, and

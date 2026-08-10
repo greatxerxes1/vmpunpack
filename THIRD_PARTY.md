@@ -8,7 +8,7 @@ onto your machine at install time, directly from their own publishers. Their lic
 
 | Component | Fetched from | Licence | Notes |
 |---|---|---|---|
-| **sogen** (`analyzer.exe`) | [milk-analyzer/sogen release `vmpunpack-1.0.0`](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.0), SHA-256 pinned | **GPL-2.0** | Windows/Linux userspace emulator by [momo5502](https://github.com/momo5502/sogen), patched — source on the [`vmpunpack` branch](https://github.com/milk-analyzer/sogen/tree/vmpunpack). |
+| **sogen** (`analyzer.exe`) | [milk-analyzer/sogen release `vmpunpack-1.0.1`](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.1), SHA-256 pinned | **GPL-2.0** | Windows/Linux userspace emulator by [momo5502](https://github.com/momo5502/sogen), patched — source on the [`vmpunpack` branch](https://github.com/milk-analyzer/sogen/tree/vmpunpack). |
 | **Unicorn Engine** (`unicorn-emulator.dll`) | bundled in the sogen build | **GPL-2.0** | CPU backend. |
 | **Icicle** (`icicle-emulator.dll`) | bundled in the sogen build | see upstream | Alternative CPU backend. |
 | **Ghidra processor specs** (`sogen/Ghidra/`) | bundled in the sogen build | **Apache-2.0** | Instruction definitions used by the emulator. |

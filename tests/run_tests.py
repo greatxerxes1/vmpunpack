@@ -281,7 +281,7 @@ def w_late(d, t0):
     with open(os.path.join(d, "unpacked.meta"), "w") as f: f.write(meta_text())
     with open(os.path.join(d, "unpacked_late.bin"), "wb") as f: f.write(b"late http://late-only-c2.top/cfg")
     with open(os.path.join(d, "heap.bin"), "wb") as f: f.write(b"heap 45.11.22.33")
-code, sout = run_main([tp, "-o", out, "--late", "5000"], w_late)
+code, sout = run_main([tp, "-o", out, "--late", "5000", "--run-payload"], w_late)
 ioc = open(os.path.join(out, "iocs.txt"), encoding="utf-8").read() if os.path.exists(os.path.join(out, "iocs.txt")) else ""
 check("4d late dump IOCs reach iocs.txt", "late-only-c2.top" in ioc, ioc[:120].replace("\n", " | "))
 check("4d heap IOCs reach iocs.txt", "45.11.22.33" in ioc)

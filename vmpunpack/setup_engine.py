@@ -12,8 +12,8 @@ ROOT_URL = "https://sogen.dev/root.zip"
 # GPL-2.0 binary travels with the code it was built from. Pinned by hash: the archive is fetched over
 # the network and executed against live malware, so a silent substitution must not go unnoticed.
 ANALYZER_URL = ("https://github.com/milk-analyzer/sogen/releases/download/"
-                "vmpunpack-1.0.0/sogen-vmpunpack-win-x64.zip")
-ANALYZER_SHA256 = "6d077827cc590d740611cbc5ce1ded3bc9cff9cf0c840275ad744d9fd0d6760b"
+                "vmpunpack-1.0.1/sogen-vmpunpack-win-x64.zip")
+ANALYZER_SHA256 = "464263badb031875f81b42dc6b4083ffbcee45163f363d53b90d701553ec1e13"
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EMUROOT = os.path.join(_HERE, "emu_root")
@@ -26,10 +26,12 @@ def _human(n):
         n /= 1024
 
 
-def download(url, dest):
+def download(url, dest, timeout=60):
     print(f"[*] {url}")
     h = hashlib.sha256()
-    with urllib.request.urlopen(url) as r, open(dest, "wb") as f:
+    # Without this a server that stalls after the headers hangs setup.cmd forever behind a frozen
+    # progress bar: socket.getdefaulttimeout() is None.
+    with urllib.request.urlopen(url, timeout=timeout) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
@@ -126,6 +128,13 @@ def main():
                 sys.exit(f"[!] sha256 mismatch for the engine archive\n"
                          f"    expected {want}\n    got      {got}\n"
                          "    Refusing to install it. This archive is executed against live malware.")
+            # sogen/ is analyzer.exe's own DLL search directory. Extracting over a previous install
+            # would leave that version's DLLs mixed with this version's analyzer.
+            if args.force and os.path.isdir(SOGEN):
+                try: shutil.rmtree(SOGEN)
+                except OSError as e:
+                    sys.exit(f"[!] cannot clear {SOGEN}: {e}\n"
+                             "    Close anything holding a file there and re-run.")
             os.makedirs(SOGEN, exist_ok=True)
             with zipfile.ZipFile(zp) as z:
                 for m in z.namelist():

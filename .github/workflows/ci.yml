@@ -42,6 +42,9 @@ jobs:
       - name: Regression suite (verification gaps)
         run: python tests/run_tests2.py
 
+      - name: Reconstruction and OEP suite
+        run: python tests/run_tests3.py
+
       - name: Launcher suite
         shell: pwsh
         run: ./tests/launcher.ps1

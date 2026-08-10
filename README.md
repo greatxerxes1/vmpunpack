@@ -38,7 +38,7 @@ once:
 
 - the **emulation root** from [sogen.dev](https://sogen.dev/root.zip): a captured Windows userland the
   emulator boots against;
-- the **patched emulator** from [milk-analyzer/sogen](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.0),
+- the **patched emulator** from [milk-analyzer/sogen](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.1),
   pinned by SHA-256. Stock upstream sogen will not work — the unpack hooks live in the emulator, not in
   this Python — and that build is GPL-2.0, so its source is published on the
   [`vmpunpack` branch](https://github.com/milk-analyzer/sogen/tree/vmpunpack) of that fork.
@@ -59,18 +59,20 @@ RUN_ME.cmd C:\samples\thing.exe
 Output lands in `<sample>_unpacked\` next to the sample.
 
 > **Run one sample at a time.** `C:\dumps` is a fixed scratch path compiled into the emulator, so every
-> invocation on the machine shares it. Two concurrent runs are detected and refused, not silently mixed.
+> invocation on the machine shares it. A run takes a lock on `C:\dumps\.lock` and a second one refuses
+> to start while it is held; a lock left behind by a crash is taken over automatically after the
+> timeout elapses. Published output is separately bound to the run that produced it.
 
 ### Flags
 
 | flag | meaning |
 |---|---|
-| `-o OUTDIR` | output dir (default `<sample>_unpacked`); cleared of stale artefacts each run, so it must not be `C:\dumps` |
+| `-o OUTDIR` | output dir (default `<sample>_unpacked`); cleared of the previous run's artefacts once a dump is accepted, so it must not be `C:\dumps` |
 | `--run-payload` | run past OEP and capture behaviour instead of freezing there |
 | `--nodelay` | neutralize anti-sandbox `NtDelayExecution` sleeps |
 | `--tsc 0x8000` | advance rdtsc by a stride per call, collapsing rdtsc delay loops |
 | `--oep 0xRVA` | force the OEP RVA, overriding the heuristic |
-| `--late N` | also dump `unpacked_late.bin` + `heap.bin` after N post-OEP blocks (runtime-decrypted config) |
+| `--late N` | also dump `unpacked_late.bin` + `heap.bin` after N post-OEP blocks (runtime-decrypted config); requires `--run-payload`, since without it there are no post-OEP blocks |
 | `--timeout SEC` | run cap, default 300 |
 | `--sogen DIR` / `--emuroot DIR` | engine paths, if you keep them outside the checkout |
 
@@ -95,11 +97,31 @@ looks Microsoft-ish, like `windows-defender-update[.]top`, is reported, not supp
 1. **`unicorn` backend, `--no-inst-precision`.** sogen defaults to per-instruction hooks; letting the
    TCG JIT run finishes the stub and its decompression in about two minutes instead of never.
 2. **OEP detection.** An execution hook is armed on the target's original code section — the lowest-RVA
-   executable section that does not contain the packer entry point. The first hit there is the OEP.
-   Every address comes from the target's own headers; nothing is hard-coded.
+   executable section that does not contain the packer entry point. The first hit there is the OEP,
+   derived from the target's own headers. It is a heuristic with no corroboration, so vmpunpack checks
+   the result: it names the section the OEP landed in, warns if that section is not executable or if
+   the OEP equals the packer's entry point, and refuses to publish an image whose OEP page came back
+   empty. Treat a warned-about result as suspect rather than as an unpack.
 3. **Ordinal gap-fill.** Imports are scanned for `#ORD` entries; where the emulation root's DLL leaves
    that ordinal an empty export slot, it is pointed at a `ret` stub so the guest loader can snap it.
    Without this a fresh sample dies with `STATUS_ORDINAL_NOT_FOUND` (`C0000138`).
+
+## What the sample sees
+
+The emulation root is a capture of a **GitHub Actions Windows runner**, so from inside it the guest
+looks like a Hyper-V virtual machine and says so loudly: the `SYSTEM` hive carries hundreds of
+`Hyper-V`, `VMBus` and `Azure` entries, `USERNAME` is `runneradmin`, and `COMPUTERNAME` is a
+`runnervm…` string that changes with each upstream rebuild. vmpunpack drops the sample where a
+download would land rather than in a directory of its own, but nothing here disguises the environment.
+
+That matters for evasive samples. If one bails immediately, exits cleanly with no dump, or behaves
+differently than it does in a sandbox, assume it detected the VM before assuming vmpunpack is broken.
+`--nodelay` and `--tsc` defeat the timing checks, not the environment ones.
+
+If you need an environment that does not look like CI, build the root from a machine you control with
+sogen's [`grab-registry.bat`](https://github.com/momo5502/sogen/blob/main/src/tools/grab-registry.bat)
+and point `--emuroot` at it. That replaces the username, the machine name and the hardware artefacts
+together, which is why it beats renaming anything.
 
 ## Limits
 

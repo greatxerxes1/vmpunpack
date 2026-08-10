@@ -35,7 +35,7 @@ setup.cmd
 `setup.cmd` 会下载本仓库不再分发的两个第三方组件，约 500 MB，只需一次：
 
 - **模拟根环境**，来自 [sogen.dev](https://sogen.dev/root.zip)：模拟器启动时所依托的 Windows 用户态快照；
-- **打过补丁的模拟器**，来自 [milk-analyzer/sogen](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.0)，
+- **打过补丁的模拟器**，来自 [milk-analyzer/sogen](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.1)，
   并以 SHA-256 固定校验。原版 sogen 无法使用——脱壳钩子位于模拟器中，而不在这份 Python 代码里——该构建
   采用 GPL-2.0，因此其源码已发布在同一 fork 的
   [`vmpunpack` 分支](https://github.com/milk-analyzer/sogen/tree/vmpunpack)。
@@ -56,18 +56,19 @@ RUN_ME.cmd C:\samples\thing.exe
 结果会输出到样本旁边的 `<sample>_unpacked\` 目录。
 
 > **一次只处理一个样本。** `C:\dumps` 是硬编码在模拟器内的固定暂存路径，本机上的每次运行都共用它。
-> 两个并发运行会被检测并拒绝，而不会被悄悄混在一起。
+> 每次运行会持有 `C:\dumps\.lock` 锁，锁被持有期间第二个运行拒绝启动；崩溃遗留的锁会在超时之后被自动
+> 接管。此外，最终发布的产物还会单独与产生它的那次运行绑定校验。
 
 ### 命令行参数
 
 | 参数 | 含义 |
 |---|---|
-| `-o OUTDIR` | 输出目录（默认 `<sample>_unpacked`）；每次运行都会清除其中的旧产物，因此不能设为 `C:\dumps` |
+| `-o OUTDIR` | 输出目录（默认 `<sample>_unpacked`）；在转储通过校验后清除上次运行的产物，因此不能设为 `C:\dumps` |
 | `--run-payload` | 越过 OEP 继续执行并记录行为，而不是在该处停下 |
 | `--nodelay` | 消除用于对抗沙箱的 `NtDelayExecution` 休眠 |
 | `--tsc 0x8000` | 每次调用按给定步长推进 rdtsc，压缩基于 rdtsc 的延时循环 |
 | `--oep 0xRVA` | 手动指定 OEP 的 RVA，覆盖启发式判断 |
-| `--late N` | 在 OEP 之后的第 N 个基本块再转储 `unpacked_late.bin` 与 `heap.bin`（运行时解密的配置） |
+| `--late N` | 在 OEP 之后的第 N 个基本块再转储 `unpacked_late.bin` 与 `heap.bin`（运行时解密的配置）；需要配合 `--run-payload`，否则 OEP 之后根本不会执行任何基本块 |
 | `--timeout SEC` | 运行时间上限，默认 300 |
 | `--sogen DIR` / `--emuroot DIR` | 引擎路径，适用于把它们放在工作副本之外的情况 |
 
@@ -92,10 +93,28 @@ IOC 提取会把每个转储分别按单字节文本和两种对齐方式的 UTF
 1. **`unicorn` 后端配合 `--no-inst-precision`。** sogen 默认为每条指令挂钩；放开 TCG 的 JIT 之后，壳代
    码连同解压过程大约两分钟即可跑完，而不是永远跑不完。
 2. **OEP 识别。** 在样本的原始代码段上挂执行钩子——即不包含壳入口点、RVA 最小的可执行段。首次命中该段
-   即为 OEP。所有地址都取自样本自身的 PE 头，没有任何硬编码。
+   即为 OEP，该地址取自样本自身的 PE 头。这是一个没有旁证的启发式判断，因此 vmpunpack 会校验结果：报告
+   OEP 落在哪个段，若该段不可执行、或 OEP 与壳入口点相同则发出警告，并拒绝发布 OEP 所在页为空的映像。
+   带警告的结果应视为可疑，而不是脱壳成功。
 3. **序号导入补洞。** 扫描导入表中的 `#ORD` 条目；如果模拟根环境里的 DLL 对该序号留有空的导出槽位，就
    把它指向一个 `ret` 桩，使客户机加载器能够解析。否则新样本会以 `STATUS_ORDINAL_NOT_FOUND`
    （`C0000138`）失败。
+
+## 样本看到的环境
+
+模拟根环境是 **GitHub Actions Windows 运行器**的快照，因此从内部看，客户机就是一台 Hyper-V 虚拟机，而且
+毫不掩饰：`SYSTEM` 注册表配置单元里有数百条 `Hyper-V`、`VMBus` 与 `Azure` 记录，`USERNAME` 为
+`runneradmin`，`COMPUTERNAME` 是形如 `runnervm…` 的字符串，且每次上游重建都会变化。vmpunpack 会把样本
+放到下载文件通常会落到的位置，而不是单独的目录，但这并不能伪装环境本身。
+
+这对具备反分析能力的样本很关键。如果某个样本立即退出、干净收场却没有转储，或者行为与在沙箱中不同，请先
+假设它识别出了虚拟机，而不是先怀疑 vmpunpack 出错。`--nodelay` 与 `--tsc` 能绕过基于时间的检测，但绕不过
+基于环境的检测。
+
+如果你需要一个不像 CI 的环境，请用 sogen 的
+[`grab-registry.bat`](https://github.com/momo5502/sogen/blob/main/src/tools/grab-registry.bat) 从你自己
+掌控的机器上生成模拟根环境，并用 `--emuroot` 指向它。这会同时替换用户名、计算机名和硬件痕迹——这也正是它
+比单纯改名更有效的原因。
 
 ## 局限
 

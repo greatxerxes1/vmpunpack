@@ -64,3 +64,5 @@ jobs:
           Write-Host $out
           if ($LASTEXITCODE -eq 0) { throw "--check should fail on a checkout with no engine" }
           if ($out -notmatch 'analyzer\.exe') { throw "--check should name the missing analyzer" }
+          # --check is expected to exit 1 here; do not let that become the step's status
+          exit 0

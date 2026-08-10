@@ -47,4 +47,6 @@ Check 'quoted path with spaces forwarded intact' ($out -match 'with spaces\\s\.e
 
 Write-Host ''
 Write-Host "$pass passed, $fail failed"
-if ($fail -gt 0) { exit 1 }
+# Exit explicitly: this script's last native call is a cmd.exe launcher that returns 1 or 2 by
+# design, and pwsh would otherwise propagate that leftover $LASTEXITCODE as the script's status.
+if ($fail -gt 0) { exit 1 } else { exit 0 }

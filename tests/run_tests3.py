@@ -244,6 +244,95 @@ try:
 finally:
     V.DUMPS = old_dumps
 
+print("\n=== setup_engine --export / --import round trip ===")
+_sspec = importlib.util.spec_from_file_location("vmpsetup", os.path.join(REPO, "vmpunpack", "setup_engine.py"))
+S = importlib.util.module_from_spec(_sspec); _sspec.loader.exec_module(S)
+
+def fake_install(root):
+    os.makedirs(os.path.join(root, "sogen"), exist_ok=True)
+    with open(os.path.join(root, "sogen", "analyzer.exe"), "wb") as f: f.write(b"MZ" + b"\x00" * 4000)
+    with open(os.path.join(root, "sogen", "unicorn-emulator.dll"), "wb") as f: f.write(b"MZ" + b"\x01" * 900)
+    reg = os.path.join(root, "emu_root", "root", "registry")
+    fs = os.path.join(root, "emu_root", "root", "filesys", "c", "users", "j.smith")
+    os.makedirs(reg, exist_ok=True); os.makedirs(fs, exist_ok=True)
+    with open(os.path.join(reg, "SOFTWARE"), "wb") as f: f.write(b"regf" + b"\x00" * 2000)
+    with open(os.path.join(fs, "ntuser.dat"), "wb") as f: f.write(b"regf" + b"\x00" * 100)
+
+def point_at(root):
+    S._HERE = root
+    S.SOGEN = os.path.join(root, "sogen")
+    S.EMUROOT = os.path.join(root, "emu_root")
+
+lab = fresh("bundle")
+src, dst = os.path.join(lab, "src"), os.path.join(lab, "dst")
+os.makedirs(src); os.makedirs(dst)
+fake_install(src)
+zp = os.path.join(lab, "bundle.zip")
+
+point_at(src)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf): S.export_bundle(zp)
+check("export produces an archive", os.path.isfile(zp), f"{os.path.getsize(zp) if os.path.isfile(zp) else 0} B")
+check("export prints a sha256 for the transfer", "sha256" in buf.getvalue())
+import zipfile as _zf
+with _zf.ZipFile(zp) as z:
+    names = z.namelist()
+    man = __import__("json").loads(z.read(S.MANIFEST))
+check("the bundle carries a manifest",
+      man.get("vmpunpack_bundle") == 1 and man.get("files") == 4, str(man.get("files")))
+check("the manifest records the pinned engine", man.get("analyzer_sha256") == S.ANALYZER_SHA256)
+check("archive mirrors the install layout",
+      any(n.startswith("sogen/") for n in names) and any(n.startswith("emu_root/root/") for n in names))
+
+point_at(dst)
+code = 0
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf): S.import_bundle(zp)
+except SystemExit as e:
+    code = e.code if isinstance(e.code, int) else 1
+check("import into a clean tree succeeds", code == 0, buf.getvalue().strip()[-60:])
+check("engine landed", os.path.isfile(os.path.join(dst, "sogen", "analyzer.exe")))
+check("emulation root landed", os.path.isfile(os.path.join(dst, "emu_root", "root", "registry", "SOFTWARE")))
+check("nested guest files landed",
+      os.path.isfile(os.path.join(dst, "emu_root", "root", "filesys", "c", "users", "j.smith", "ntuser.dat")))
+check("--check passes on the imported tree", not S.check(verbose=False))
+
+code = 0
+try:
+    with contextlib.redirect_stdout(io.StringIO()): S.import_bundle(zp)
+except SystemExit as e:
+    code = 1 if e.code else 0
+check("import over an existing install refuses without --force", code != 0)
+
+code = 0
+try:
+    with contextlib.redirect_stdout(io.StringIO()): S.import_bundle(zp, force=True, want_sha="0" * 64)
+except SystemExit as e:
+    code = 1 if e.code else 0
+check("a wrong --sha256 is refused", code != 0)
+
+point_at(os.path.join(lab, "empty"))
+os.makedirs(os.path.join(lab, "empty"), exist_ok=True)
+code = 0
+try:
+    with contextlib.redirect_stdout(io.StringIO()): S.export_bundle(os.path.join(lab, "x.zip"))
+except SystemExit as e:
+    code = 1 if e.code else 0
+check("export from an incomplete install refuses", code != 0)
+
+evil = os.path.join(lab, "evil.zip")
+with _zf.ZipFile(evil, "w") as z:
+    z.writestr(S.MANIFEST, '{"vmpunpack_bundle":1}')
+    z.writestr("../escaped.txt", "x")
+point_at(os.path.join(lab, "victim")); os.makedirs(os.path.join(lab, "victim"), exist_ok=True)
+code = 0
+try:
+    with contextlib.redirect_stdout(io.StringIO()): S.import_bundle(evil, force=True)
+except SystemExit as e:
+    code = 1 if e.code else 0
+check("a traversing bundle entry is refused", code != 0 and not os.path.exists(os.path.join(lab, "escaped.txt")))
+
 print("\n" + "=" * 60)
 bad = [n for n, ok in R if not ok]
 print(f"{len(R)-len(bad)}/{len(R)} passed")

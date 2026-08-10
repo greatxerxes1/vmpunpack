@@ -46,6 +46,25 @@ once:
 `setup.cmd --check` verifies an existing install at any time. `--analyzer-url <zip>` substitutes your
 own build. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
+### Air-gapped machines
+
+`setup.cmd` needs the network, so on an isolated analysis VM install on a connected machine first and
+carry the result across:
+
+```bat
+setup.cmd                              :: on the connected machine
+setup.cmd --export bundle.zip          :: ~150 MB, prints a SHA-256
+:: move bundle.zip and a checkout to the VM, then:
+setup.cmd --import bundle.zip --sha256 <the printed hash>
+```
+
+`--import` fetches nothing. Cloning on the offline VM instead will not work — `sogen/` and `emu_root/`
+are not in the repository, which is the whole point of `setup.cmd`.
+
+The bundle is the emulation root you downloaded plus the engine, repackaged for your own transfer; it
+is not ours to hand to anyone else, and the Microsoft system files inside it are not yours to either.
+See [THIRD_PARTY.md](THIRD_PARTY.md).
+
 ### Requirements
 
 Windows x64, Python 3.8+. Nothing else — the tool is stdlib-only so it runs on locked-down analysis VMs.

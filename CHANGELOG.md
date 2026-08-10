@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `setup.cmd --export bundle.zip` / `--import bundle.zip`, for air-gapped analysis VMs. Install on a
+  connected machine, export one archive with a printed SHA-256, carry it across, import. `--import`
+  fetches nothing, refuses a bundle whose entries would escape the target directory, refuses to
+  overwrite an existing install without `--force`, and prints the manifest so the operator can see
+  which engine build is being installed. This repackages what the operator already downloaded for
+  their own transfer; it redistributes nothing.
+
 ### Changed
 
 - Split the driver into modules with no behaviour change. `vmpunpack/pe.py` holds the PE parsing and

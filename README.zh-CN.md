@@ -43,6 +43,23 @@ setup.cmd
 随时可用 `setup.cmd --check` 校验已有安装，用 `--analyzer-url <zip>` 替换为你自己的构建。详见
 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
+### 无网络的机器
+
+`setup.cmd` 需要联网，因此对于隔离的分析虚拟机，请先在联网机器上安装，再把结果搬过去：
+
+```bat
+setup.cmd                              :: 在联网的机器上
+setup.cmd --export bundle.zip          :: 约 150 MB，并打印 SHA-256
+:: 把 bundle.zip 和一份仓库副本拷到虚拟机，然后：
+setup.cmd --import bundle.zip --sha256 <打印出来的哈希>
+```
+
+`--import` 不会下载任何东西。直接在离线虚拟机上克隆仓库没有用：`sogen/` 与 `emu_root/` 并不在仓库里，
+这正是 `setup.cmd` 存在的理由。
+
+该归档是你自己下载的模拟根环境连同模拟器，为你自己的转移而重新打包。把它再转交他人不是我们的权利，
+其中的 Microsoft 系统文件也不是你的权利。详见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
 ### 运行环境
 
 Windows x64、Python 3.8+。除此之外别无依赖：本工具只使用标准库，以便在受限的分析虚拟机上直接运行。

@@ -7,7 +7,7 @@ repository carries only the driver and this script pulls the rest on first use. 
 import argparse, hashlib, json, os, shutil, sys, tempfile, time, zipfile
 import urllib.request
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
 
 ROOT_URL = "https://sogen.dev/root.zip"
 # Patched sogen. Its source is the vmpunpack branch of milk-analyzer/sogen, published so that this

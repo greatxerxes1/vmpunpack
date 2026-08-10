@@ -14,7 +14,7 @@ from pe import (BadPE, MAX_ORDINALS, page_up, sections, rva_to_off, pe_basics, o
                 export_ordinal_range, patch_export_ordinal_to_ret, reconstruct_pe)
 from iocs import grep_iocs
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
 
 DUMPS = r"C:\dumps"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

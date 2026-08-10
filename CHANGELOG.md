@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
+First tagged release. The engine is pinned at
+[`vmpunpack-1.0.1`](https://github.com/milk-analyzer/sogen/releases/tag/vmpunpack-1.0.1).
+
 ### Added
 
 - `setup.cmd --export bundle.zip` / `--import bundle.zip`, for air-gapped analysis VMs. Install on a
@@ -127,6 +132,7 @@ does not correspond to the input.
   dump the unpacked image, reconstruct a loadable PE, grep IOCs, and auto-fill ordinal-import gaps in
   the emulation root.
 
-[Unreleased]: https://github.com/milk-analyzer/vmpunpack/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/milk-analyzer/vmpunpack/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/milk-analyzer/vmpunpack/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/milk-analyzer/vmpunpack/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/milk-analyzer/vmpunpack/releases/tag/v0.1.0

@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Split the driver into modules with no behaviour change. `vmpunpack/pe.py` holds the PE parsing and
+  `reconstruct_pe`; `vmpunpack/iocs.py` holds the IOC extraction; `vmpunpack.py` keeps orchestration
+  and drops from 568 lines to 428, with `main()` down from 183 to about 40 across `parse_args`,
+  `load_target`, `accept_dump` and `publish`. `patch_ordinal.py` now imports the shared parser instead
+  of carrying its own copy, so the bounds checks added for the automatic gap-fill apply to the manual
+  path too — it loses a third of its lines in the process.
+
 - The pinned engine is now `vmpunpack-1.0.1`. It fixes a host-pointer dereference of a guest-authored
   exception record, de-hardcodes the self-modification write window (previously two literals from one
   sample, which also granted write during ordinary sogen runs), makes `SOGEN_OEP_RVA` hook the exact

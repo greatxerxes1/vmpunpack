@@ -175,14 +175,16 @@ try:
     finally: h2.close()
 finally: hold.close()
 
-print("\n=== 2.7  _host must not read the userinfo ===")
+print("\n=== 2.7  host_of must not read the userinfo ===")
+_ispec = importlib.util.spec_from_file_location("vmpiocs", os.path.join(REPO, "vmpunpack", "iocs.py"))
+IOC = importlib.util.module_from_spec(_ispec); _ispec.loader.exec_module(IOC)
 check("2.7 userinfo spoof no longer suppresses the URL",
-      V._host("http://update.microsoft.com@185.220.101.5/p.bin") == "185.220.101.5",
-      V._host("http://update.microsoft.com@185.220.101.5/p.bin"))
+      IOC.host_of("http://update.microsoft.com@185.220.101.5/p.bin") == "185.220.101.5",
+      IOC.host_of("http://update.microsoft.com@185.220.101.5/p.bin"))
 d, u, i = V.grep_iocs(b"http://www.microsoft.com@c2host.top/gate.php")
 check("2.7 spoofed URL survives into iocs", len(u) == 1 and "c2host.top" in d, f"{d} {u}")
 check("2.7 genuine CA noise with userinfo still filtered",
-      V.NOISE_HOST.match(V._host("http://ocsp@digicert.com/x.crl")) is not None)
+      IOC.NOISE_HOST.match(IOC.host_of("http://ocsp@digicert.com/x.crl")) is not None)
 
 print("\n=== 2.8  torn .bin / .meta pair ===")
 def w_torn(d, t0):

@@ -23,7 +23,7 @@ jobs:
         python: ["3.8", "3.11", "3.13"]
 
     steps:
-      # Shallow, and no LFS: the suites drive synthetic PEs, so neither the engine
+      # Shallow, and no  LFS: the suites drive synthetic PEs, so neither the engine
       # nor the emulation root is needed.
       - uses: actions/checkout@v4
         with:

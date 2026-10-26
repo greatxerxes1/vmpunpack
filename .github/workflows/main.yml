@@ -46,18 +46,25 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller wheel setuptools
-        if (Test-Path requirements.txt) { pip install -r requirements.txt }
-        if (Test-Path vmpunpack/requirements.txt) { pip install -r vmpunpack/requirements.txt }
+        if (Test-Path "requirements.txt") { pip install -r requirements.txt }
+        if (Test-Path "vmpunpack/requirements.txt") { pip install -r vmpunpack/requirements.txt }
 
     - name: Download Emulator Setup
       run: |
-        if (Test-Path setup.cmd) { ./setup.cmd }
-        else if (Test-Path vmpunpack/setup.cmd) { cd vmpunpack; ./setup.cmd }
+        if (Test-Path "setup.cmd") {
+            ./setup.cmd
+        } elseif (Test-Path "vmpunpack/setup.cmd") {
+            cd vmpunpack
+            ./setup.cmd
+        }
 
     - name: Compile to Independent EXE Folder
       run: |
-        if (Test-Path vmpunpack.py) { pyinstaller --noconfirm --onedir vmpunpack.py }
-        else if (Test-Path vmpunpack/vmpunpack.py) { pyinstaller --noconfirm --onedir vmpunpack/vmpunpack.py }
+        if (Test-Path "vmpunpack.py") {
+            pyinstaller --noconfirm --onedir vmpunpack.py
+        } elseif (Test-Path "vmpunpack/vmpunpack.py") {
+            pyinstaller --noconfirm --onedir vmpunpack/vmpunpack.py
+        }
 
     - name: Embed Required Assets & Engines
       run: |

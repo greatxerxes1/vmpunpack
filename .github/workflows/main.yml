@@ -1,7 +1,7 @@
 name: Build vmpunpack EXE
 
 on:
-  workflow_dispatch: # این گزینه به شما اجازه می‌دهد بیلد را به صورت دستی دکمه‌ای اجرا کنید
+  workflow_dispatch: # این گزینه به شما اجازه می‌دهد بیلد را به صورت دستی دکمه‌ای اجرا  کنید
 
 jobs:
   build:

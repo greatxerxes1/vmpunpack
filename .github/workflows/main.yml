@@ -1,7 +1,7 @@
-name: Build vmpunpack EXE
+name: Build vmpunpack EXE (Fixed)
 
 on:
-  workflow_dispatch: # این گزینه به شما اجازه می‌دهد بیلد را به صورت دستی دکمه‌ای اجرا  کنید
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,19 +19,24 @@ jobs:
     - name: Install PyInstaller & Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install pyinstaller wheel
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-    - name: Run Project Setup (Download Emulator files)
+    - name: Run Project Setup
       run: |
         ./setup.cmd
 
-    - name: Build EXE with PyInstaller
+    - name: Build EXE with PyInstaller Directory Mode
       run: |
-        pyinstaller --onefile vmpunpack.py
+        pyinstaller --noconfirm vmpunpack.py
 
-    - name: Upload Compiled EXE Artifact
+    - name: Copy Emulator Assets to Dist
+      run: |
+        if (Test-Path "sogen_engine") { Copy-Item -Path "sogen_engine" -Destination "dist/vmpunpack/sogen_engine" -Recurse -Force }
+        if (Test-Path "engine") { Copy-Item -Path "engine" -Destination "dist/vmpunpack/engine" -Recurse -Force }
+
+    - name: Upload Compiled Artifact Folder
       uses: actions/upload-artifact@v4
       with:
-        name: vmpunpack-windows-exe
-        path: dist/vmpunpack.exe
+        name: vmpunpack-compiled-suite
+        path: dist/vmpunpack/

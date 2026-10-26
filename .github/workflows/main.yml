@@ -1,0 +1,37 @@
+name: Build vmpunpack EXE
+
+on:
+  workflow_dispatch: # این گزینه به شما اجازه می‌دهد بیلد را به صورت دستی دکمه‌ای اجرا کنید
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install PyInstaller & Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+    - name: Run Project Setup (Download Emulator files)
+      run: |
+        ./setup.cmd
+
+    - name: Build EXE with PyInstaller
+      run: |
+        pyinstaller --onefile vmpunpack.py
+
+    - name: Upload Compiled EXE Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: vmpunpack-windows-exe
+        path: dist/vmpunpack.exe

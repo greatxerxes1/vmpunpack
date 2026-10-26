@@ -5,10 +5,9 @@ on:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # این خط اجازه می‌دهد هر زمان خواستید دستی هم بیلد را اجرا کنید
+  workflow_dispatch:
 
 jobs:
-  # بخش اول: اجرای تست‌های اصلی پروژه برای اطمینان از سلامت کدها
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -25,13 +24,13 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        if [ -f vmpunpack/requirements.txt ]; then pip install -r vmpunpack/requirements.txt; fi
     - name: Run Tests
       run: |
-        python -m unittest discover -s tests -p "*.py" || echo "No tests or test framework found"
+        python -m unittest discover -s tests -p "*.py" || python -m unittest discover -s vmpunpack/tests -p "*.py" || echo "No tests found"
 
-  # بخش دوم: کامپایل پروژه و ساخت فایل EXE برای ویندوز
   build-windows:
-    needs: test # ابتدا صبر میکند تا تست‌ها با موفقیت پاس شوند
+    needs: test
     runs-on: windows-latest
 
     steps:
@@ -48,19 +47,24 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller wheel setuptools
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
+        if (Test-Path vmpunpack/requirements.txt) { pip install -r vmpunpack/requirements.txt }
 
     - name: Download Emulator Setup
       run: |
-        ./setup.cmd
+        if (Test-Path setup.cmd) { ./setup.cmd }
+        else if (Test-Path vmpunpack/setup.cmd) { cd vmpunpack; ./setup.cmd }
 
     - name: Compile to Independent EXE Folder
       run: |
-        pyinstaller --noconfirm --onedir vmpunpack.py
+        if (Test-Path vmpunpack.py) { pyinstaller --noconfirm --onedir vmpunpack.py }
+        else if (Test-Path vmpunpack/vmpunpack.py) { pyinstaller --noconfirm --onedir vmpunpack/vmpunpack.py }
 
     - name: Embed Required Assets & Engines
       run: |
         if (Test-Path "sogen_engine") { Copy-Item -Path "sogen_engine" -Destination "dist/vmpunpack/sogen_engine" -Recurse -Force }
+        if (Test-Path "vmpunpack/sogen_engine") { Copy-Item -Path "vmpunpack/sogen_engine" -Destination "dist/vmpunpack/sogen_engine" -Recurse -Force }
         if (Test-Path "engine") { Copy-Item -Path "engine" -Destination "dist/vmpunpack/engine" -Recurse -Force }
+        if (Test-Path "vmpunpack/engine") { Copy-Item -Path "vmpunpack/engine" -Destination "dist/vmpunpack/engine" -Recurse -Force }
 
     - name: Upload Finished EXE Package
       uses: actions/upload-artifact@v4
